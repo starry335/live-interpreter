@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 GUMMY_WEBSOCKET_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
@@ -18,7 +18,7 @@ def emit(payload: Dict[str, object]) -> None:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Alibaba Cloud Gummy realtime translation worker.")
     parser.add_argument("--source-language", default="auto")
     parser.add_argument("--target-language", default="zh")
@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transcription-enabled", action="store_true", default=True)
     parser.add_argument("--translation-enabled", action="store_true", default=True)
     parser.add_argument("--no-translation", dest="translation_enabled", action="store_false")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 class GummyConnection:
@@ -209,8 +209,8 @@ class GummyConnection:
             pass
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
     api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
         emit({"event": "error", "message": "Missing DASHSCOPE_API_KEY."})

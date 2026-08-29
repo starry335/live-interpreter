@@ -107,14 +107,30 @@ def configure_environment() -> None:
     os.environ.setdefault("HF_HOME", str(MODEL_CACHE / "huggingface"))
     os.environ.setdefault("TRANSFORMERS_CACHE", str(MODEL_CACHE / "huggingface"))
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-    os.environ["TCL_LIBRARY"] = str(ENV_TCL)
-    os.environ["TK_LIBRARY"] = str(ENV_TK)
-    os.environ["PATH"] = str(ENV_ROOT / "Library" / "bin") + os.pathsep + os.environ.get("PATH", "")
+    if not getattr(sys, "frozen", False):
+        os.environ["TCL_LIBRARY"] = str(ENV_TCL)
+        os.environ["TK_LIBRARY"] = str(ENV_TK)
+        os.environ["PATH"] = str(ENV_ROOT / "Library" / "bin") + os.pathsep + os.environ.get("PATH", "")
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
+
+
+def self_command(*args: str) -> List[str]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *args]
+    return [sys.executable, str(Path(__file__).resolve()), *args]
+
+
+def bundled_child_options() -> Dict[str, object]:
+    env = os.environ.copy()
+    options: Dict[str, object] = {"env": env}
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return options
 
 
 def resolve_device(device: str) -> str:
@@ -1737,20 +1753,19 @@ def iter_ready_chunks(chunks_dir: Path, processed: set, min_age: float, min_seco
 def start_audio_capture(audio_device: str, chunks_dir: Path, chunk_seconds: float) -> subprocess.Popen:
     if audio_device == LOOPBACK_DEVICE:
         return subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
+            self_command(
                 "--loopback-capture",
                 "--loopback-chunks-dir",
                 str(chunks_dir),
                 "--loopback-chunk-seconds",
                 str(chunk_seconds),
-            ],
+            ),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
+            **bundled_child_options(),
         )
     pattern = str(chunks_dir / "chunk_%06d.wav")
     args = [
@@ -1782,14 +1797,11 @@ def start_audio_capture(audio_device: str, chunks_dir: Path, chunk_seconds: floa
 def start_pcm_audio_capture(audio_device: str) -> subprocess.Popen:
     if audio_device == LOOPBACK_DEVICE:
         return subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--loopback-pcm-stream",
-            ],
+            self_command("--loopback-pcm-stream"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            **bundled_child_options(),
         )
     if not FFMPEG.exists():
         raise RuntimeError(f"FFmpeg not found: {FFMPEG}")
@@ -2035,7 +2047,7 @@ def cloud_stream_loop(
         print("Missing Alibaba Cloud Workspace ID.", file=sys.stderr, flush=True)
         stop_event.set()
         return
-    if not worker_path.exists():
+    if not getattr(sys, "frozen", False) and not worker_path.exists():
         state.set_status(f"{engine_name} worker missing")
         print(f"{engine_name} worker not found: {worker_path}", file=sys.stderr, flush=True)
         stop_event.set()
@@ -2043,12 +2055,17 @@ def cloud_stream_loop(
 
     command = [
         sys.executable,
+        "--qwen-worker" if is_qwen_live else "--gummy-worker",
+    ] if getattr(sys, "frozen", False) else [
+        sys.executable,
         str(worker_path),
+    ]
+    command.extend([
         "--source-language",
         gummy_language_code(args.source_language),
         "--target-language",
         gummy_language_code(args.target_language),
-    ]
+    ])
     if is_qwen_live:
         command.extend(
             [
@@ -2075,7 +2092,7 @@ def cloud_stream_loop(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,
-        env=os.environ.copy(),
+        **bundled_child_options(),
     )
     cloud_holder["proc"] = cloud_proc
     ready = threading.Event()

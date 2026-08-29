@@ -23,7 +23,7 @@ def emit(payload: Dict[str, object]) -> None:
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Qwen3.5 LiveTranslate realtime text worker.")
     parser.add_argument("--source-language", default="ja")
     parser.add_argument("--target-language", default="zh")
@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workspace-id", default=os.environ.get("DASHSCOPE_WORKSPACE_ID", ""))
     parser.add_argument("--region", choices=sorted(REGION_HOSTS), default="beijing")
     parser.add_argument("--visual-file", default="")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def event_text(message: Dict[str, object]) -> str:
@@ -288,8 +288,8 @@ class QwenLiveConnection:
             pass
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
     api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
         emit({"event": "error", "message": "Missing DASHSCOPE_API_KEY."})

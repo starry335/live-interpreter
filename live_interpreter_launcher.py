@@ -37,6 +37,17 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def backend_executable_path() -> Path:
+    return app_dir() / "LiveInterpreterBackend.exe"
+
+
+def child_creation_flags() -> int:
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    if getattr(sys, "frozen", False):
+        flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return flags
+
+
 def resource_path(name: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", app_dir()))
     candidate = base / name
@@ -72,6 +83,27 @@ def runtime_script_path() -> Path:
 
 def child_environment() -> dict[str, str]:
     env = os.environ.copy()
+    for key in list(env):
+        if key.startswith("_PYI") or key in {
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "TCL_LIBRARY",
+            "TK_LIBRARY",
+            "CONDA_PREFIX",
+            "CONDA_DEFAULT_ENV",
+        }:
+            env.pop(key, None)
+    if getattr(sys, "frozen", False):
+        env.update(
+            {
+                "NO_PROXY": "*",
+                "no_proxy": "*",
+                "PYTHONNOUSERSITE": "1",
+                "PYINSTALLER_RESET_ENVIRONMENT": "1",
+            }
+        )
+        return env
+
     system_root = env.get("SystemRoot", r"C:\Windows")
     inherited_path = [
         part
@@ -108,15 +140,12 @@ def child_environment() -> dict[str, str]:
             "TK_LIBRARY": str(ENV_TK),
         }
     )
-    for key in list(env):
-        if key.startswith("_PYI") or key in {"PYTHONHOME", "PYTHONPATH"}:
-            env.pop(key, None)
     return env
 
 
 def list_audio_devices() -> list[str]:
     if not FFMPEG.exists():
-        raise RuntimeError(f"FFmpeg not found: {FFMPEG}")
+        return [EDGE_TAB_LABEL, LOOPBACK_LABEL]
     proc = subprocess.run(
         [str(FFMPEG), "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
         stdout=subprocess.PIPE,
@@ -211,7 +240,11 @@ class Launcher:
         ttk.Combobox(
             asr_box,
             textvariable=self.asr_engine,
-            values=("qwen3.5-live", "gummy", "sensevoice", "streaming"),
+            values=(
+                ("qwen3.5-live", "gummy")
+                if getattr(sys, "frozen", False)
+                else ("qwen3.5-live", "gummy", "sensevoice", "streaming")
+            ),
             state="readonly",
             width=15,
         ).pack(side=LEFT)
@@ -266,7 +299,13 @@ class Launcher:
         ttk.Checkbutton(checks, text="透明字幕窗口", variable=self.overlay_enabled).pack(side=LEFT, padx=(0, 18))
         ttk.Checkbutton(checks, text="显示原文", variable=self.overlay_show_source).pack(side=LEFT, padx=(0, 18))
         ttk.Checkbutton(checks, text="启用翻译", variable=self.translate_enabled).pack(side=LEFT, padx=(0, 18))
-        ttk.Checkbutton(checks, text="录制屏幕", variable=self.record_screen).pack(side=LEFT)
+        self.record_screen_button = ttk.Checkbutton(
+            checks, text="录制屏幕", variable=self.record_screen
+        )
+        self.record_screen_button.pack(side=LEFT)
+        if not FFMPEG.exists():
+            self.record_screen.set(False)
+            self.record_screen_button.configure(state="disabled")
 
         visual_check = ttk.Frame(settings)
         visual_check.grid(row=6, column=1, columnspan=2, sticky="w", pady=(0, 7))
@@ -320,11 +359,18 @@ class Launcher:
         self.add_log("请在 edge://extensions 开启开发人员模式，然后加载此解压缩目录。")
 
     def command(self) -> list[str]:
-        script = runtime_script_path()
-        if not ENV_PYTHON.exists():
-            raise RuntimeError(f"Python environment not found: {ENV_PYTHON}")
-        if not script.exists():
-            raise RuntimeError(f"live_interpreter.py not found: {script}")
+        if getattr(sys, "frozen", False):
+            backend = backend_executable_path()
+            if not backend.exists():
+                raise RuntimeError(f"后台程序不存在，请重新安装：{backend}")
+            command_prefix = [str(backend)]
+        else:
+            script = runtime_script_path()
+            if not ENV_PYTHON.exists():
+                raise RuntimeError(f"Python environment not found: {ENV_PYTHON}")
+            if not script.exists():
+                raise RuntimeError(f"live_interpreter.py not found: {script}")
+            command_prefix = [str(ENV_PYTHON), str(script)]
         source_language = self.source_language.get() or "auto"
         asr_engine = self.asr_engine.get() or "qwen3.5-live"
         edge_tab_audio = self.audio_device.get() == EDGE_TAB_LABEL
@@ -354,8 +400,7 @@ class Launcher:
         overlay_hold_seconds = max(2.0, min(30.0, overlay_hold_seconds))
         self.overlay_hold_seconds.set(f"{overlay_hold_seconds:g}")
         cmd = [
-            str(ENV_PYTHON),
-            str(script),
+            *command_prefix,
             "--audio-device",
             (
                 EDGE_TAB_DEVICE
@@ -447,6 +492,7 @@ class Launcher:
                 encoding="utf-8",
                 errors="replace",
                 env=child_environment(),
+                creationflags=child_creation_flags(),
                 timeout=20,
             )
             output = proc.stdout.strip()
@@ -515,7 +561,6 @@ class Launcher:
             workspace_id = self.aliyun_workspace_id.get().strip()
             if workspace_id:
                 env["DASHSCOPE_WORKSPACE_ID"] = workspace_id
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             self.process = subprocess.Popen(
                 cmd,
                 cwd=str(app_dir()),
@@ -525,7 +570,7 @@ class Launcher:
                 encoding="utf-8",
                 errors="replace",
                 env=env,
-                creationflags=creationflags,
+                creationflags=child_creation_flags(),
             )
         except Exception as exc:
             messagebox.showerror(APP_TITLE, str(exc))

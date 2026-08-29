@@ -3,29 +3,27 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_data_files
+
 
 ROOT = Path(SPECPATH)
 ANACONDA_BIN = Path(sys.base_prefix) / 'Library' / 'bin'
 
 
 a = Analysis(
-    ['live_interpreter_launcher.py'],
+    ['live_interpreter_backend.py'],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[
-        ('edge_extension', 'edge_extension'),
-    ],
-    hiddenimports=[],
+    datas=collect_data_files('certifi'),
+    hiddenimports=['certifi', 'websocket', 'tkinter', 'tkinter.font'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['funasr', 'torch', 'transformers'],
     noarchive=False,
     optimize=0,
 )
 
-# PyInstaller may find Tcl/Tk DLLs from unrelated directories on PATH.
-# Keep them matched with E:\ANACONDA\Library\lib\tcl8.6 and tk8.6.
 if (ANACONDA_BIN / 'tcl86t.dll').exists() and (ANACONDA_BIN / 'tk86t.dll').exists():
     a.binaries = [
         item for item in a.binaries
@@ -44,14 +42,14 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='LiveInterpreter',
+    name='LiveInterpreterBackend',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

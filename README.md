@@ -2,34 +2,38 @@
 
 这个目录包含一个电脑同传工具，可以采集电脑音频，实时识别、翻译，并把字幕显示在透明置顶窗口中。默认使用阿里云 Qwen3.5 LiveTranslate 实时文本翻译，也保留 Gummy 和 FunASR 本地识别模式。
 
-## GitHub 发布说明
+## Windows 安装版
 
-仓库只包含源码、Edge 扩展和构建配置，不包含模型、虚拟环境、API Key、视频、音频或运行日志。
+从 GitHub Releases 下载 `LiveInterpreter-Setup-v0.2.0.exe` 后直接安装。安装版自带 Python 运行时、透明字幕界面、Edge 扩展和云端连接组件，不需要安装 Conda、Python、FFmpeg 或本地模型。
 
-当前 Windows EXE 是轻量启动器，不是完全独立的便携程序。运行它的电脑需要准备 Python 环境，并通过环境变量指定路径：
+安装版支持：
+
+- 阿里云 `Qwen3.5 LiveTranslate` 实时文本同传和画面辅助。
+- 阿里云 `Gummy Realtime` 实时语音翻译。
+- Windows 默认电脑声音（WASAPI Loopback）。
+- Edge 当前标签页独立音频、网页内字幕和可选画面辅助。
+- 桌面透明字幕悬浮窗。
+
+启动后直接填写阿里云百炼 API Key；Qwen3.5 还需要填写同地域的 Workspace ID。凭证只传给本次后台进程，不写入安装目录或仓库。
+
+安装版不包含 FunASR、Nemotron、本地 Qwen 模型和屏幕录制所需的 FFmpeg。这些本地开发功能仍可从源码运行，并通过环境变量指定已有环境：
 
 ```powershell
 $env:LIVE_INTERPRETER_ENV = "C:\path\to\python-env"
-$env:FUNASR_ROOT = "C:\path\to\FunAsr"  # 仅本地模型模式需要
+$env:FUNASR_ROOT = "C:\path\to\FunAsr"
 ```
 
-只使用阿里云 Qwen3.5 LiveTranslate 时，在该 Python 环境安装最小依赖：
+不要把真实凭证写入仓库；环境变量方式可参考 [`.env.example`](.env.example)。
 
-```powershell
-python -m pip install -r requirements-cloud.txt
-```
+## 0. 安装并打开
 
-阿里云凭证应在启动器中填写或通过 `DASHSCOPE_API_KEY`、`DASHSCOPE_WORKSPACE_ID` 环境变量提供。不要把真实凭证写入仓库；可参考 [`.env.example`](.env.example)。
-
-## 0. 直接打开 exe
-
-已打包的启动器位于：
+安装后从开始菜单或桌面快捷方式打开：
 
 ```text
-dist\LiveInterpreter_fixed.exe
+Live Interpreter
 ```
 
-双击后会打开图形界面，可以刷新音频设备、选择设备、启动/停止同传。点击“打开字幕页”时，如果同传后台还没启动，启动器会先启动后台服务，等 `127.0.0.1:8765` 可访问后再打开浏览器。
+图形界面可以选择 Edge 当前标签页或 Windows 默认电脑声音、填写凭证并启动/停止同传。点击“打开字幕页”时，如果后台尚未启动，启动器会先启动服务，等 `127.0.0.1:8765` 可访问后再打开浏览器。
 
 ## Edge 当前标签页模式
 
@@ -44,8 +48,6 @@ dist\LiveInterpreter_fixed.exe
 扩展只发送当前标签页的 16 kHz 单声道音频，不会采集桌面或其他软件的声音。直播软件只需选择该 Edge 窗口；字幕已在网页内部，因此无需显示器采集。原生全屏同样支持，画中画窗口不支持页面字幕覆盖。
 
 启用“画面辅助”后，扩展还会把当前标签页画面压缩为最长边 960px 的 JPEG，约每秒上传 1 张，为 Qwen3.5 LiveTranslate 提供动画角色、屏幕文字和场景上下文。关闭该选项时扩展不会申请视频轨道，也不会上传截图。画面辅助只在 `qwen3.5-live` 与 Edge 当前标签页模式组合下生效。
-
-这个 exe 是轻量启动器，会调用本机已有的 `E:\ANACONDA\envs\funasr_py38` 环境。Qwen3.5 LiveTranslate 和 Gummy 模式不加载本地 ASR 或 Qwen 模型；FunASR 模式继续使用 `E:\FunAsr\models`。
 
 使用 Qwen3.5 LiveTranslate 前，在启动器中填写同一阿里云百炼地域下的 API Key、Workspace ID，并选择 `beijing` 或 `singapore`。凭证只会传入本次运行的子进程，不会保存到项目文件。该模式固定请求纯文本输出，不会生成或播放中文语音。
 
@@ -117,6 +119,8 @@ Qwen3.5 LiveTranslate 和 Gummy 模式会持续发送 16 kHz 单声道 PCM，并
 
 ## 5. 同时录制屏幕
 
+此功能仅供源码开发模式使用，需要 FFmpeg；独立安装版中该选项为禁用状态。
+
 ```powershell
 .\run_live_interpreter.bat --audio-device "VoiceMeeter Output (VB-Audio VoiceMeeter VAIO)" --record-screen
 ```
@@ -164,7 +168,9 @@ Qwen3.5 LiveTranslate 和 Gummy 模式会持续发送 16 kHz 单声道 PCM，并
 
 ## 依赖说明
 
-工具复用本机已经存在的环境和模型：
+独立安装版自带 Python 3.11 运行时、`websocket-client`、`certifi` 和 Tcl/Tk，只使用云端实时模型，不要求显卡。
+
+源码开发模式可以继续复用本机环境和模型：
 
 - Python：`E:\ANACONDA\envs\funasr_py38\python.exe`
 - FFmpeg：`E:\ANACONDA\envs\funasr_py38\Library\bin\ffmpeg.exe`

@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .packenv/
+.packenv311/
 .whisperenv/
 build/
 dist/
