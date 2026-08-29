@@ -1,0 +1,29 @@
+# Python and packaging
+__pycache__/
+*.py[cod]
+.packenv/
+.whisperenv/
+build/
+dist/
+
+# Local models, downloads, media, and runtime data
+models/
+downloads/
+inputs/
+outputs/
+runtime/
+audio_probe_*/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.log
+
+# Editor and OS files
+.agents/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

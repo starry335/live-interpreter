@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m unittest discover -v
+      - run: node --check edge_extension/service_worker.js
+      - run: node --check edge_extension/offscreen.js

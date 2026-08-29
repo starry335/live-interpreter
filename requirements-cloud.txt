@@ -1,0 +1,2 @@
+certifi>=2024.2.2
+websocket-client>=1.8.0

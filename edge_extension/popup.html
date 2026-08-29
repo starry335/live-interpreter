@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Interpreter</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Live Interpreter</h1>
+        <p id="status">准备就绪</p>
+      </div>
+      <span id="indicator" aria-hidden="true"></span>
+    </header>
+
+    <label class="field">
+      <span>本地端口</span>
+      <input id="port" type="number" min="1024" max="65535" value="8765">
+    </label>
+    <label class="field">
+      <span>字幕字号</span>
+      <input id="font-size" type="number" min="14" max="48" value="16">
+    </label>
+    <label class="field">
+      <span>停留秒数</span>
+      <input id="hold-seconds" type="number" min="2" max="30" value="8">
+    </label>
+    <label class="toggle">
+      <input id="show-source" type="checkbox">
+      <span>同时显示原文</span>
+    </label>
+
+    <div class="actions">
+      <button id="start" class="primary">翻译当前标签页</button>
+      <button id="stop" disabled>停止</button>
+    </div>
+    <p class="note">先在 Live Interpreter 中选择“Edge 当前标签页”并启动同传。</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

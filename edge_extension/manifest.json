@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Live Interpreter Tab Subtitles",
+  "version": "0.1.3",
+  "description": "Capture audio and optional visual context from the current Edge tab for live translated subtitles.",
+  "permissions": ["activeTab", "offscreen", "scripting", "storage", "tabCapture"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "action": {
+    "default_title": "Live Interpreter",
+    "default_popup": "popup.html"
+  }
+}
