@@ -15,7 +15,7 @@ GUMMY_WEBSOCKET_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
 
 
 def emit(payload: Dict[str, object]) -> None:
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
+    print(json.dumps(payload, ensure_ascii=True), flush=True)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:

@@ -4,7 +4,7 @@
 
 ## Windows 安装版
 
-从 GitHub Releases 下载 `LiveInterpreter-Setup-v0.2.0.exe` 后直接安装。安装版自带 Python 运行时、透明字幕界面、Edge 扩展和云端连接组件，不需要安装 Conda、Python、FFmpeg 或本地模型。
+从 GitHub Releases 下载 `LiveInterpreter-Setup-v0.2.1.exe` 后直接安装。安装版自带 Python 运行时、透明字幕界面、Edge 扩展和云端连接组件，不需要安装 Conda、Python、FFmpeg 或本地模型。
 
 安装版支持：
 
@@ -169,6 +169,8 @@ Qwen3.5 LiveTranslate 和 Gummy 模式会持续发送 16 kHz 单声道 PCM，并
 ## 依赖说明
 
 独立安装版自带 Python 3.11 运行时、`websocket-client`、`certifi` 和 Tcl/Tk，只使用云端实时模型，不要求显卡。
+
+`v0.2.1` 起安装版使用目录式运行时，不再在每次启动时把程序解压到 `%TEMP%`，更适合未安装开发环境、启用 Defender 或限制临时目录的电脑。云端工作进程使用 ASCII 安全的 JSON 传输字幕，因此不受 Windows GBK、UTF-8 等系统代码页影响；系统代理仍可用于访问阿里云，仅本机 `127.0.0.1` 字幕服务绕过代理。
 
 源码开发模式可以继续复用本机环境和模型：
 

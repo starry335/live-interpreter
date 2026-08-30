@@ -23,5 +23,5 @@ if (!(Test-Path $python)) {
 & $pyinstaller --noconfirm --clean (Join-Path $root "LiveInterpreterBackend.spec")
 
 Write-Host ""
-Write-Host "Built: $(Join-Path $root 'dist\LiveInterpreter.exe')"
-Write-Host "Built: $(Join-Path $root 'dist\LiveInterpreterBackend.exe')"
+Write-Host "Built: $(Join-Path $root 'dist\LiveInterpreter')"
+Write-Host "Built: $(Join-Path $root 'dist\LiveInterpreterBackend')"

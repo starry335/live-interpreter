@@ -37,8 +37,19 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def install_root() -> Path:
+    directory = app_dir()
+    if getattr(sys, "frozen", False) and directory.name.lower() == "launcher":
+        return directory.parent
+    return directory
+
+
 def backend_executable_path() -> Path:
-    return app_dir() / "LiveInterpreterBackend.exe"
+    candidates = [
+        install_root() / "backend" / "LiveInterpreterBackend.exe",
+        app_dir() / "LiveInterpreterBackend.exe",
+    ]
+    return next((path for path in candidates if path.exists()), candidates[0])
 
 
 def child_creation_flags() -> int:
@@ -67,7 +78,7 @@ def copy_runtime_asset(name: str) -> Path:
 
 
 def extension_dir() -> Path:
-    target = app_dir() / "edge_extension"
+    target = install_root() / "edge_extension"
     source = resource_path("edge_extension")
     if source.exists() and source.resolve() != target.resolve():
         shutil.copytree(source, target, dirs_exist_ok=True)
@@ -93,11 +104,18 @@ def child_environment() -> dict[str, str]:
             "CONDA_DEFAULT_ENV",
         }:
             env.pop(key, None)
+    no_proxy = ",".join(
+        part
+        for part in (env.get("NO_PROXY") or env.get("no_proxy") or "", "127.0.0.1", "localhost")
+        if part
+    )
+    env["NO_PROXY"] = no_proxy
+    env["no_proxy"] = no_proxy
     if getattr(sys, "frozen", False):
         env.update(
             {
-                "NO_PROXY": "*",
-                "no_proxy": "*",
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1",
                 "PYTHONNOUSERSITE": "1",
                 "PYINSTALLER_RESET_ENVIRONMENT": "1",
             }
@@ -128,14 +146,14 @@ def child_environment() -> dict[str, str]:
     env.update(
         {
             "PATH": os.pathsep.join(path_parts),
-            "NO_PROXY": "*",
-            "no_proxy": "*",
             "MODELSCOPE_CACHE": str(FUNASR_MODELS),
             "HF_HOME": str(FUNASR_MODELS / "huggingface"),
             "TRANSFORMERS_CACHE": str(FUNASR_MODELS / "huggingface"),
             "CONDA_PREFIX": str(ENV_ROOT),
             "CONDA_DEFAULT_ENV": "funasr_py38",
             "PYTHONNOUSERSITE": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
             "TCL_LIBRARY": str(ENV_TCL),
             "TK_LIBRARY": str(ENV_TK),
         }
@@ -323,7 +341,7 @@ class Launcher:
         self.stop_button.pack(side=LEFT, padx=(10, 0))
         ttk.Button(actions, text="选择工作目录", command=self.choose_work_dir).pack(side=RIGHT)
 
-        self.work_dir = StringVar(value=str(app_dir() / "runtime"))
+        self.work_dir = StringVar(value=str(install_root() / "runtime"))
         ttk.Label(root, textvariable=self.work_dir).pack(fill="x", pady=(0, 8))
 
         log_frame = ttk.LabelFrame(root, text="运行日志", padding=8)

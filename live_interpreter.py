@@ -106,7 +106,8 @@ def configure_environment() -> None:
     os.environ.setdefault("MODELSCOPE_CACHE", str(MODEL_CACHE))
     os.environ.setdefault("HF_HOME", str(MODEL_CACHE / "huggingface"))
     os.environ.setdefault("TRANSFORMERS_CACHE", str(MODEL_CACHE / "huggingface"))
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    os.environ["PYTHONUTF8"] = "1"
     if not getattr(sys, "frozen", False):
         os.environ["TCL_LIBRARY"] = str(ENV_TCL)
         os.environ["TK_LIBRARY"] = str(ENV_TK)
@@ -126,6 +127,8 @@ def self_command(*args: str) -> List[str]:
 
 def bundled_child_options() -> Dict[str, object]:
     env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     options: Dict[str, object] = {"env": env}
     if getattr(sys, "frozen", False):
         env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"

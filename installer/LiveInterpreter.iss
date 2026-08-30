@@ -1,5 +1,5 @@
 #define AppName "Live Interpreter"
-#define AppVersion "0.2.0"
+#define AppVersion "0.2.1"
 #define Publisher "starry335"
 #define AppUrl "https://github.com/starry335/live-interpreter"
 
@@ -22,7 +22,7 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-UninstallDisplayIcon={app}\LiveInterpreter.exe
+UninstallDisplayIcon={app}\launcher\LiveInterpreter.exe
 CloseApplications=yes
 RestartApplications=no
 
@@ -33,15 +33,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："; Flags: unchecked
 
 [Files]
-Source: "..\dist\LiveInterpreter.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\LiveInterpreterBackend.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\LiveInterpreter\*"; DestDir: "{app}\launcher"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\LiveInterpreterBackend\*"; DestDir: "{app}\backend"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\edge_extension\*"; DestDir: "{app}\edge_extension"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\corpus.phrases"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\LiveInterpreter.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\LiveInterpreter.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\launcher\LiveInterpreter.exe"; WorkingDir: "{app}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\launcher\LiveInterpreter.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\LiveInterpreter.exe"; Description: "启动 {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\launcher\LiveInterpreter.exe"; Description: "启动 {#AppName}"; Flags: nowait postinstall skipifsilent
