@@ -65,7 +65,7 @@ class GummyConnection:
                 "cert_reqs": ssl.CERT_REQUIRED,
             },
         )
-        self.ws.settimeout(1.0)
+        self.ws.settimeout(10.0)
         self.receiver = threading.Thread(target=self._receive_loop, daemon=True)
         self.receiver.start()
         self.ws.send(
@@ -98,7 +98,7 @@ class GummyConnection:
                 ensure_ascii=False,
             )
         )
-        if not self.started.wait(timeout=20):
+        if not self.started.wait(timeout=20) or self.failed.is_set():
             raise RuntimeError(self.error or "Timed out waiting for Gummy task-started.")
         emit({"event": "ready", "task_id": self.task_id})
 
@@ -112,10 +112,18 @@ class GummyConnection:
                 if not self.finished.is_set():
                     self.error = str(exc)
                     self.failed.set()
+                    self.finished.set()
+                    self.started.set()
                     emit({"event": "error", "message": self.error})
                 return
             if not raw:
-                continue
+                if not self.finished.is_set():
+                    self.error = "WebSocket closed by remote endpoint"
+                    self.failed.set()
+                    self.finished.set()
+                    self.started.set()
+                    emit({"event": "error", "message": self.error})
+                return
             try:
                 message = json.loads(raw)
             except (TypeError, json.JSONDecodeError):
@@ -134,6 +142,7 @@ class GummyConnection:
                 self.error = str(header.get("error_message") or header.get("error_code") or "Task failed.")
                 self.failed.set()
                 self.finished.set()
+                self.started.set()
                 emit(
                     {
                         "event": "error",
@@ -178,7 +187,7 @@ class GummyConnection:
             )
 
     def send_audio(self, data: bytes) -> None:
-        if self.failed.is_set():
+        if self.failed.is_set() or self.finished.is_set():
             raise RuntimeError(self.error or "Gummy task failed.")
         self.ws.send_binary(data)
 
@@ -219,7 +228,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     connection = GummyConnection(args, api_key)
     try:
         connection.open()
-        while not connection.failed.is_set():
+        while not connection.finished.is_set():
             frame = sys.stdin.buffer.read(3200)
             if not frame:
                 break

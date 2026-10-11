@@ -1,5 +1,5 @@
 #define AppName "Live Interpreter"
-#define AppVersion "0.2.1"
+#define AppVersion "0.2.2"
 #define Publisher "starry335"
 #define AppUrl "https://github.com/starry335/live-interpreter"
 

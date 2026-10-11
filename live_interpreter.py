@@ -6,6 +6,7 @@ import array
 import ctypes
 import datetime as _dt
 import json
+import logging
 import os
 import queue
 import re
@@ -17,6 +18,7 @@ import time
 import uuid
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Tuple
 
@@ -491,9 +493,33 @@ class State:
         self.lock = threading.Lock()
         self.events: List[Dict[str, object]] = []
         self.status = "starting"
+        self.reconnecting_since: Optional[float] = None
+
+    def begin_reconnect(self) -> None:
+        with self.lock:
+            if self.reconnecting_since is None:
+                self.reconnecting_since = time.monotonic()
+
+    def finish_reconnect(self) -> None:
+        with self.lock:
+            if self.reconnecting_since is None:
+                return
+            now = time.monotonic()
+            pause = now - self.reconnecting_since
+            for item in self.events:
+                item["updated_at"] = float(item["updated_at"]) + pause
+                if item.get("finalized_at") is not None:
+                    item["finalized_at"] = float(item["finalized_at"]) + pause
+                elif not item.get("final"):
+                    # A lost session cannot finish its last partial sentence.
+                    item["final"] = True
+                    item["finalized_at"] = now
+            self.reconnecting_since = None
 
     def set_status(self, status: str) -> None:
         with self.lock:
+            if self.reconnecting_since is not None and status.startswith("listening"):
+                return
             self.status = status
 
     def add_event(self, source: str, translated: str, chunk: str) -> None:
@@ -562,8 +588,9 @@ class State:
                 "service": "live-interpreter",
                 "api_version": 2,
                 "status": self.status,
-                "monotonic_now": time.monotonic(),
-                "events": list(self.events),
+                "monotonic_now": self.reconnecting_since if self.reconnecting_since is not None else time.monotonic(),
+                "reconnecting": self.reconnecting_since is not None,
+                "events": [dict(item) for item in self.events],
             }
 
     def clear_events(self) -> None:
@@ -581,12 +608,15 @@ class BrowserAudioInput:
         self.active = threading.Event()
 
     def start(self) -> None:
+        self.discard_pending()
+        self.active.set()
+
+    def discard_pending(self) -> None:
         while True:
             try:
                 self.frames.get_nowait()
             except queue.Empty:
                 break
-        self.active.set()
 
     def stop(self) -> None:
         self.active.clear()
@@ -948,11 +978,33 @@ def subtitle_spacing(linespace: int) -> Tuple[int, int]:
     return line_height, max(9, round(line_height * 0.2))
 
 
+def load_overlay_geometry(path: Path, fallback: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        geometry = tuple(data[key] for key in ("width", "height", "x", "y"))
+        if all(type(value) is int for value in geometry) and geometry[0] >= 480 and geometry[1] >= 180:
+            return geometry
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return fallback
+
+
+def save_overlay_geometry(path: Path, geometry: Tuple[int, int, int, int]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(dict(zip(("width", "height", "x", "y"), geometry))), encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError as exc:
+        print(f"Could not save subtitle window position: {exc}", file=sys.stderr, flush=True)
+
+
 def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threading.Event) -> None:
     import tkinter as tk
     from tkinter import font as tkfont
 
-    width, height, x, y = args.overlay_geometry
+    geometry_path = args.work_dir / "overlay_window.json"
+    width, height, x, y = load_overlay_geometry(geometry_path, args.overlay_geometry)
     transparent_color = "#010203"
     drag_offset = {"x": None, "y": None}
     resize_state = {
@@ -1010,6 +1062,22 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
     icon_font = tkfont.Font(family="Segoe UI Symbol", size=-16, weight="normal")
     subtitle_line_height, subtitle_sentence_gap = subtitle_spacing(subtitle_font.metrics("linespace"))
     source_line_height = max(20, source_font.metrics("linespace") + 2)
+    geometry_save_timer = None
+
+    def persist_geometry() -> None:
+        nonlocal geometry_save_timer
+        geometry_save_timer = None
+        save_overlay_geometry(geometry_path, (root.winfo_width(), root.winfo_height(), root.winfo_x(), root.winfo_y()))
+
+    def window_configured(event: tk.Event) -> None:
+        nonlocal geometry_save_timer
+        if event.widget is not root:
+            return
+        if geometry_save_timer is not None:
+            root.after_cancel(geometry_save_timer)
+        geometry_save_timer = root.after(150, persist_geometry)
+
+    root.bind("<Configure>", window_configured)
 
     def rounded_rect(x1: int, y1: int, x2: int, y2: int, radius: int, **kwargs) -> int:
         points = [
@@ -1094,6 +1162,7 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
             invalidate()
 
     def close_overlay(event: Optional[tk.Event] = None) -> None:
+        persist_geometry()
         stop_event.set()
         state.set_status("stopping")
         root.destroy()
@@ -1216,6 +1285,8 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
             run_action(pressed)
         elif not moved and controls_were_visible:
             hide_controls()
+        if moved:
+            persist_geometry()
         invalidate()
 
     def leave_pointer(event: tk.Event) -> None:
@@ -1409,17 +1480,19 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
             index,
         )
 
-    def compose_live(events: List[Dict[str, object]]) -> Tuple[str, str]:
+    def compose_live(events: List[Dict[str, object]], now: float) -> Tuple[str, str]:
         return compose_live_subtitles(
             events,
             args.overlay_live_events,
             args.overlay_live_max_events,
             args.overlay_hold_seconds,
             args.overlay_live_max_chars,
+            now=now,
         )
 
     def refresh() -> None:
         if stop_event.is_set():
+            persist_geometry()
             root.destroy()
             return
         snapshot = state.snapshot()
@@ -1430,7 +1503,7 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
             ui_state["status_changed_at"] = current_time
         events = snapshot["events"]
         if args.overlay_live_mode:
-            text, source = compose_live(events)
+            text, source = compose_live(events, float(snapshot["monotonic_now"]))
         else:
             if len(events) < int(display_state["count"]):
                 display_state["count"] = 0
@@ -1978,9 +2051,10 @@ def handle_cloud_output(
     proc: subprocess.Popen,
     state: State,
     ready: threading.Event,
-    connection_state: Dict[str, bool],
+    connection_state: Dict[str, object],
     translation_enabled: bool,
     engine_name: str,
+    session_id: str = "",
 ) -> None:
     if not proc.stdout:
         return
@@ -1996,12 +2070,14 @@ def handle_cloud_output(
         event = message.get("event")
         if event == "ready":
             connection_state["ok"] = True
+            connection_state["connected_at"] = time.monotonic()
+            state.finish_reconnect()
             state.set_status(f"listening ({engine_name})")
             ready.set()
             print(f"{engine_name} realtime translation connected.", flush=True)
         elif event == "result":
             sentence_id = message.get("sentence_id")
-            chunk = f"{engine_name}-{sentence_id}"
+            chunk = f"{engine_name}-{session_id}-{sentence_id}"
             source = message.get("source") if "source" in message else None
             translated = message.get("translation") if "translation" in message else None
             final = bool(
@@ -2021,12 +2097,25 @@ def handle_cloud_output(
                 print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
         elif event == "error":
             error = str(message.get("message") or "unknown error")
+            if message.get("code"):
+                error = f"{message['code']}: {error}"
             connection_state["ok"] = False
+            connection_state["error"] = error
+            connection_state["ended"] = True
+            state.begin_reconnect()
             state.set_status(f"{engine_name} error: {error}")
             ready.set()
             print(f"{engine_name} error: {error}", file=sys.stderr, flush=True)
         elif event == "finished":
+            connection_state["ended"] = True
+            connection_state["error"] = "cloud session finished"
             print(f"{engine_name} realtime translation finished.", flush=True)
+    connection_state["ended"] = True
+    ready.set()
+
+
+def cloud_retry_delay(failures: int) -> float:
+    return min(30.0, 2.0 ** min(max(0, failures - 1), 5))
 
 
 def cloud_stream_loop(
@@ -2087,7 +2176,57 @@ def cloud_stream_loop(
     if not is_qwen_live and args.translation_engine == "none":
         command.append("--no-translation")
 
-    state.set_status(f"connecting to Alibaba Cloud {engine_name}")
+    logger = logging.Logger("cloud-recovery")
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(args.work_dir / "cloud_recovery.log", maxBytes=512000, backupCount=2, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    logger.addHandler(handler)
+    failures = 0
+    try:
+        while not stop_event.is_set():
+            session_id = uuid.uuid4().hex[:12]
+            connection_state: Dict[str, object] = {"ok": False, "ended": False, "error": "", "connected_at": None}
+            try:
+                run_cloud_session(args, state, stop_event, audio_holder, cloud_holder, browser_audio,
+                                  command, engine_name, session_id, connection_state)
+            except Exception as exc:
+                connection_state["error"] = str(exc)
+            if stop_event.is_set():
+                break
+            connected_at = connection_state.get("connected_at")
+            if connected_at is not None and time.monotonic() - float(connected_at) >= 60:
+                failures = 0
+            failures += 1
+            delay = cloud_retry_delay(failures)
+            reason = str(connection_state.get("error") or "cloud worker exited")
+            reason = reason.replace(os.environ.get("DASHSCOPE_API_KEY", ""), "[redacted]")
+            state.begin_reconnect()
+            state.set_status(f"{engine_name} reconnecting in {delay:g}s (attempt {failures})")
+            latest = state.latest_event()
+            message = f"{engine_name} session {session_id}: {reason}; retry in {delay:g}s; last subtitle={latest.get('chunk') if latest else 'none'}"
+            logger.warning(message)
+            print(message, file=sys.stderr, flush=True)
+            if stop_event.wait(delay):
+                break
+    finally:
+        handler.close()
+        logger.removeHandler(handler)
+
+
+def run_cloud_session(
+    args: argparse.Namespace,
+    state: State,
+    stop_event: threading.Event,
+    audio_holder: Dict[str, Optional[subprocess.Popen]],
+    cloud_holder: Dict[str, Optional[subprocess.Popen]],
+    browser_audio: BrowserAudioInput,
+    command: List[str],
+    engine_name: str,
+    session_id: str,
+    connection_state: Dict[str, object],
+) -> None:
+    if not state.snapshot()["reconnecting"]:
+        state.set_status(f"connecting to Alibaba Cloud {engine_name}")
     cloud_proc = subprocess.Popen(
         command,
         cwd=str(ROOT),
@@ -2099,73 +2238,78 @@ def cloud_stream_loop(
     )
     cloud_holder["proc"] = cloud_proc
     ready = threading.Event()
-    connection_state = {"ok": False}
-    threading.Thread(
+    output_thread = threading.Thread(
         target=handle_cloud_output,
         args=(
             cloud_proc,
             state,
             ready,
             connection_state,
-            is_qwen_live or args.translation_engine != "none",
+            args.asr_engine == "qwen3.5-live" or args.translation_engine != "none",
             engine_name,
+            session_id,
         ),
         daemon=True,
-    ).start()
-    threading.Thread(
+    )
+    output_thread.start()
+    stderr_thread = threading.Thread(
         target=forward_binary_stderr, args=(cloud_proc, engine_name), daemon=True
-    ).start()
-
-    if (
-        not ready.wait(timeout=25)
-        or not connection_state["ok"]
-        or cloud_proc.poll() is not None
-    ):
-        if cloud_proc.poll() is None:
-            state.set_status(f"{engine_name} connection timeout")
-        stop_event.set()
-        return
+    )
+    stderr_thread.start()
 
     restart_count = 0
     try:
+        deadline = time.monotonic() + 25
+        while not ready.wait(0.1):
+            if stop_event.is_set():
+                return
+            if cloud_proc.poll() is not None or time.monotonic() >= deadline:
+                break
+        if stop_event.is_set():
+            return
+        if not connection_state["ok"] or connection_state["ended"] or cloud_proc.poll() is not None:
+            if not connection_state["error"]:
+                connection_state["error"] = "connection initialization timed out or worker exited"
+            return
         if args.audio_device == BROWSER_DEVICE:
+            browser_audio.discard_pending()
             state.set_status("waiting for Edge tab audio")
             if not cloud_proc.stdin:
                 raise RuntimeError(f"{engine_name} stream pipe is unavailable.")
-            while not stop_event.is_set() and cloud_proc.poll() is None:
+            while not stop_event.is_set() and not connection_state["ended"] and cloud_proc.poll() is None:
                 frame = browser_audio.read()
                 if not frame:
                     continue
                 cloud_proc.stdin.write(frame)
                 cloud_proc.stdin.flush()
             return
-        while not stop_event.is_set() and cloud_proc.poll() is None:
+        while not stop_event.is_set() and not connection_state["ended"] and cloud_proc.poll() is None:
             capture_proc = start_pcm_audio_capture(args.audio_device)
             audio_holder["proc"] = capture_proc
-            threading.Thread(
+            capture_stderr_thread = threading.Thread(
                 target=forward_binary_stderr, args=(capture_proc, "audio"), daemon=True
-            ).start()
+            )
+            capture_stderr_thread.start()
             try:
                 if not capture_proc.stdout or not cloud_proc.stdin:
                     raise RuntimeError(f"Audio or {engine_name} stream pipe is unavailable.")
-                while not stop_event.is_set() and cloud_proc.poll() is None:
+                while not stop_event.is_set() and not connection_state["ended"] and cloud_proc.poll() is None:
                     frame = capture_proc.stdout.read(3200)
                     if not frame:
                         break
                     cloud_proc.stdin.write(frame)
                     cloud_proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
-                if cloud_proc.poll() is None and not stop_event.is_set():
-                    print(
-                        f"{engine_name} audio stream interrupted: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                raise RuntimeError(f"audio stream interrupted: {exc}") from exc
             finally:
                 stop_process(capture_proc)
+                capture_stderr_thread.join(timeout=1)
+                for stream in (capture_proc.stdout, capture_proc.stderr):
+                    if stream:
+                        stream.close()
                 audio_holder["proc"] = None
 
-            if stop_event.is_set() or cloud_proc.poll() is not None:
+            if stop_event.is_set() or connection_state["ended"] or cloud_proc.poll() is not None:
                 break
             code = capture_proc.poll()
             restart_count += 1
@@ -2175,9 +2319,10 @@ def cloud_stream_loop(
                 f"(attempt {restart_count}).",
                 flush=True,
             )
-            time.sleep(min(3.0, 0.5 * restart_count))
+            stop_event.wait(min(3.0, 0.5 * restart_count))
     except Exception as exc:
-        state.set_status(f"{engine_name} stream error: {exc}")
+        if not connection_state["error"]:
+            connection_state["error"] = str(exc)
         print(f"{engine_name} stream error: {exc}", file=sys.stderr, flush=True)
     finally:
         if cloud_proc.stdin:
@@ -2185,13 +2330,15 @@ def cloud_stream_loop(
                 cloud_proc.stdin.close()
             except OSError:
                 pass
-        try:
-            cloud_proc.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            stop_process(cloud_proc)
+        stop_process(cloud_proc)
+        output_thread.join(timeout=1)
+        stderr_thread.join(timeout=1)
+        if not connection_state["error"] and not stop_event.is_set():
+            connection_state["error"] = f"cloud worker exited with code {cloud_proc.returncode}"
         cloud_holder["proc"] = None
-        if not stop_event.is_set():
-            stop_event.set()
+        for stream in (cloud_proc.stdout, cloud_proc.stderr):
+            if stream:
+                stream.close()
 
 
 def translation_worker(
@@ -2507,14 +2654,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             while not stop_event.is_set():
                 current_audio_proc = audio_holder.get("proc")
-                if current_audio_proc is not None and current_audio_proc.poll() is not None:
+                if args.asr_engine not in cloud_engines and current_audio_proc is not None and current_audio_proc.poll() is not None:
                     raise RuntimeError(f"Audio capture stopped with exit code {current_audio_proc.returncode}")
-                current_cloud_proc = cloud_holder.get("proc")
-                if args.asr_engine in cloud_engines and current_cloud_proc is not None:
-                    if current_cloud_proc.poll() is not None:
-                        raise RuntimeError(
-                            f"Cloud worker stopped with exit code {current_cloud_proc.returncode}"
-                        )
                 time.sleep(0.5)
     except KeyboardInterrupt:
         stop_event.set()

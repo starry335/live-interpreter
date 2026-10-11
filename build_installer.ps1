@@ -16,4 +16,4 @@ if (!$iscc) {
 }
 
 & $iscc (Join-Path $root "installer\LiveInterpreter.iss")
-Write-Host "Built: $(Join-Path $root 'dist\installer\LiveInterpreter-Setup-v0.2.1.exe')"
+Write-Host "Built installer in: $(Join-Path $root 'dist\installer')"

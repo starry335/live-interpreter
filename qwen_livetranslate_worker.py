@@ -171,7 +171,7 @@ class QwenLiveConnection:
             enable_multithread=True,
             sslopt={"ca_certs": self.certifi.where(), "cert_reqs": ssl.CERT_REQUIRED},
         )
-        self.ws.settimeout(1.0)
+        self.ws.settimeout(10.0)
         self.receiver = threading.Thread(target=self._receive_loop, daemon=True)
         self.receiver.start()
         self._send(
@@ -181,7 +181,7 @@ class QwenLiveConnection:
                 "session": session_config(self.args),
             }
         )
-        if not self.updated.wait(timeout=20):
+        if not self.updated.wait(timeout=20) or self.failed.is_set():
             raise RuntimeError(self.error or "Timed out waiting for Qwen session.updated.")
         if self.args.visual_file:
             self.visual_sender = threading.Thread(target=self._visual_loop, daemon=True)
@@ -229,7 +229,9 @@ class QwenLiveConnection:
                     self._fail(str(exc))
                 return
             if not raw:
-                continue
+                if not self.finished.is_set():
+                    self._fail("WebSocket closed by remote endpoint")
+                return
             try:
                 message = json.loads(raw)
             except (TypeError, json.JSONDecodeError):
@@ -247,21 +249,22 @@ class QwenLiveConnection:
                     detail = error.get("message") or error.get("code")
                 else:
                     detail = error
-                self._fail(str(detail or "Qwen realtime request failed."))
+                code = str(error.get("code") or "") if isinstance(error, dict) else ""
+                self._fail(str(detail or "Qwen realtime request failed."), code)
                 return
             else:
                 for payload in self.normalizer.handle(message):
                     emit(payload)
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str, code: str = "") -> None:
         self.error = message
         self.failed.set()
         self.finished.set()
         self.updated.set()
-        emit({"event": "error", "message": message})
+        emit({"event": "error", "message": message, "code": code})
 
     def send_audio(self, data: bytes) -> None:
-        if self.failed.is_set():
+        if self.failed.is_set() or self.finished.is_set():
             raise RuntimeError(self.error or "Qwen realtime session failed.")
         self._send(
             {
@@ -298,7 +301,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     connection = QwenLiveConnection(args, api_key)
     try:
         connection.open()
-        while not connection.failed.is_set():
+        while not connection.finished.is_set():
             frame = sys.stdin.buffer.read(3200)
             if not frame:
                 break

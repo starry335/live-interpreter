@@ -97,6 +97,7 @@
 
   function render(snapshot) {
     status.textContent = snapshot.status || "";
+    if (snapshot.reconnecting) return;
     const now = Number(snapshot.monotonic_now);
     const maximumLines = fontSize >= 32 ? 3 : 6;
     const events = (Number.isFinite(now) ? snapshot.events || [] : []).filter((item) => {
