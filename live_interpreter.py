@@ -28,6 +28,11 @@ FUNASR_ROOT = Path(os.environ.get("FUNASR_ROOT", r"E:\FunAsr"))
 ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr_py38"))
 GUMMY_WORKER = ROOT / "gummy_realtime_worker.py"
 QWEN_LIVE_WORKER = ROOT / "qwen_livetranslate_worker.py"
+PARAFORMER_MT_WORKER = ROOT / "paraformer_mt_worker.py"
+QWEN_LIVE_MODELS = {
+    "qwen3.5-live": "qwen3.5-livetranslate-flash-realtime",
+    "qwen3.8-live": "qwen3.8-livetranslate-flash-realtime",
+}
 FFMPEG = ENV_ROOT / "Library" / "bin" / "ffmpeg.exe"
 LOOPBACK_DEVICE = "__wasapi_loopback__"
 BROWSER_DEVICE = "__edge_tab_audio__"
@@ -1971,17 +1976,20 @@ def start_screen_recording(recordings_dir: Path, fps: int) -> subprocess.Popen:
     return run_ffmpeg(args)
 
 
-def stop_process(proc: Optional[subprocess.Popen]) -> None:
+def stop_process(proc: Optional[subprocess.Popen], *, pcm_input: bool = False) -> None:
     if proc is None or proc.poll() is not None:
         return
     try:
         if proc.stdin:
-            proc.stdin.write(b"q")
-            proc.stdin.flush()
+            if pcm_input:
+                proc.stdin.close()
+            else:
+                proc.stdin.write(b"q")
+                proc.stdin.flush()
     except Exception:
         pass
     try:
-        proc.wait(timeout=5)
+        proc.wait(timeout=8 if pcm_input else 5)
     except subprocess.TimeoutExpired:
         proc.terminate()
         try:
@@ -2095,13 +2103,18 @@ def handle_cloud_output(
             text = translated if translated is not None else source
             if text:
                 print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
-        elif event == "error":
+        elif event in {"translation_usage", "usage_summary"}:
+            print(f"{engine_name} usage: {json.dumps(message, ensure_ascii=True)}", flush=True)
+        elif event == "warning":
+            print(f"{engine_name} warning: {message.get('message', '')}", file=sys.stderr, flush=True)
+        elif event in {"error", "fatal_error"}:
             error = str(message.get("message") or "unknown error")
             if message.get("code"):
                 error = f"{message['code']}: {error}"
             connection_state["ok"] = False
             connection_state["error"] = error
             connection_state["ended"] = True
+            connection_state["fatal"] = event == "fatal_error"
             state.begin_reconnect()
             state.set_status(f"{engine_name} error: {error}")
             ready.set()
@@ -2126,12 +2139,21 @@ def cloud_stream_loop(
     cloud_holder: Dict[str, Optional[subprocess.Popen]],
     browser_audio: BrowserAudioInput,
 ) -> None:
-    is_qwen_live = args.asr_engine == "qwen3.5-live"
-    engine_name = "Qwen3.5 LiveTranslate" if is_qwen_live else "Gummy"
-    worker_path = QWEN_LIVE_WORKER if is_qwen_live else GUMMY_WORKER
+    is_qwen_live = args.asr_engine in QWEN_LIVE_MODELS
+    is_paraformer_mt = args.asr_engine == "paraformer-mt"
+    engine_name = (
+        f"Paraformer + {args.mt_model}" if is_paraformer_mt else
+        args.asr_engine.replace("qwen", "Qwen").replace("-live", " LiveTranslate") if is_qwen_live else "Gummy"
+    )
+    worker_path = PARAFORMER_MT_WORKER if is_paraformer_mt else QWEN_LIVE_WORKER if is_qwen_live else GUMMY_WORKER
     if not os.environ.get("DASHSCOPE_API_KEY", "").strip():
         state.set_status("missing Alibaba Cloud API key")
         print("Missing DASHSCOPE_API_KEY. Enter the API key in the launcher.", file=sys.stderr, flush=True)
+        stop_event.set()
+        return
+    if is_paraformer_mt and args.aliyun_region != "beijing":
+        state.set_status("Paraformer requires Beijing region")
+        print("Paraformer-Realtime-V2 requires a Beijing API key and region.", file=sys.stderr, flush=True)
         stop_event.set()
         return
     if is_qwen_live and not args.aliyun_workspace_id.strip():
@@ -2147,7 +2169,7 @@ def cloud_stream_loop(
 
     command = [
         sys.executable,
-        "--qwen-worker" if is_qwen_live else "--gummy-worker",
+        "--paraformer-mt-worker" if is_paraformer_mt else "--qwen-worker" if is_qwen_live else "--gummy-worker",
     ] if getattr(sys, "frozen", False) else [
         sys.executable,
         str(worker_path),
@@ -2161,6 +2183,8 @@ def cloud_stream_loop(
     if is_qwen_live:
         command.extend(
             [
+                "--model",
+                QWEN_LIVE_MODELS[args.asr_engine],
                 "--silence-duration-ms",
                 str(args.gummy_max_end_silence),
                 "--workspace-id",
@@ -2173,6 +2197,12 @@ def cloud_stream_loop(
             command.extend(["--visual-file", str(args.work_dir / "visual_frame.jpg")])
     else:
         command.extend(["--max-end-silence", str(args.gummy_max_end_silence)])
+    if is_paraformer_mt:
+        command.extend([
+            "--workspace-id", args.aliyun_workspace_id, "--region", args.aliyun_region,
+            "--log-file", str(args.work_dir / "paraformer_mt.jsonl"),
+            "--mt-model", args.mt_model,
+        ])
     if not is_qwen_live and args.translation_engine == "none":
         command.append("--no-translation")
 
@@ -2191,6 +2221,8 @@ def cloud_stream_loop(
                                   command, engine_name, session_id, connection_state)
             except Exception as exc:
                 connection_state["error"] = str(exc)
+            if connection_state.get("fatal"):
+                stop_event.set()
             if stop_event.is_set():
                 break
             connected_at = connection_state.get("connected_at")
@@ -2245,7 +2277,7 @@ def run_cloud_session(
             state,
             ready,
             connection_state,
-            args.asr_engine == "qwen3.5-live" or args.translation_engine != "none",
+            args.asr_engine in QWEN_LIVE_MODELS or args.translation_engine != "none",
             engine_name,
             session_id,
         ),
@@ -2321,6 +2353,8 @@ def run_cloud_session(
             )
             stop_event.wait(min(3.0, 0.5 * restart_count))
     except Exception as exc:
+        if stop_event.is_set():
+            return
         if not connection_state["error"]:
             connection_state["error"] = str(exc)
         print(f"{engine_name} stream error: {exc}", file=sys.stderr, flush=True)
@@ -2330,7 +2364,7 @@ def run_cloud_session(
                 cloud_proc.stdin.close()
             except OSError:
                 pass
-        stop_process(cloud_proc)
+        stop_process(cloud_proc, pcm_input=True)
         output_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
         if not connection_state["error"] and not stop_event.is_set():
@@ -2483,11 +2517,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--source-language", default="auto", help="FunASR language: auto, zh, en, ja, ko, yue.")
     parser.add_argument(
         "--asr-engine",
-        choices=["qwen3.5-live", "gummy", "streaming", "sensevoice"],
+        choices=[*QWEN_LIVE_MODELS, "gummy", "paraformer-mt", "streaming", "sensevoice"],
         default="qwen3.5-live",
     )
     parser.add_argument("--target-language", default="Chinese", help="Translation target language.")
     parser.add_argument("--translation-engine", choices=["qwen", "none"], default="qwen")
+    parser.add_argument("--mt-model", default="qwen-mt-lite", help="Text translation model for paraformer-mt.")
     parser.add_argument("--device", default="auto", help="ASR device: auto, cpu, cuda:0.")
     parser.add_argument("--translate-device", default="auto", help="Translator device: auto, cpu, cuda:0.")
     parser.add_argument("--chunk-seconds", type=float, default=0.6)
@@ -2599,7 +2634,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     browser_audio = BrowserAudioInput()
     browser_visual = BrowserVisualInput(
         args.work_dir / "visual_frame.jpg",
-        args.visual_input and args.asr_engine == "qwen3.5-live" and args.audio_device == BROWSER_DEVICE,
+        args.visual_input and args.asr_engine in QWEN_LIVE_MODELS and args.audio_device == BROWSER_DEVICE,
     )
     stop_event = threading.Event()
     server = ThreadingHTTPServer(
@@ -2614,7 +2649,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     audio_holder: Dict[str, Optional[subprocess.Popen]] = {"proc": None}
     cloud_holder: Dict[str, Optional[subprocess.Popen]] = {"proc": None}
     screen_proc: Optional[subprocess.Popen] = None
-    cloud_engines = {"gummy", "qwen3.5-live"}
+    cloud_engines = {"gummy", "paraformer-mt", *QWEN_LIVE_MODELS}
     if args.asr_engine in cloud_engines:
         worker = threading.Thread(
             target=cloud_stream_loop,
@@ -2666,7 +2701,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         stop_event.set()
         stop_process(audio_holder.get("proc") or audio_proc)
-        stop_process(cloud_holder.get("proc"))
+        stop_process(cloud_holder.get("proc"), pcm_input=True)
         stop_process(screen_proc)
         server.shutdown()
         server.server_close()

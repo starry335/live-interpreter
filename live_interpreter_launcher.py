@@ -14,11 +14,12 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, StringVar, Tk, filedialog, messagebox
+from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, StringVar, Tk, Toplevel, filedialog, messagebox
 from tkinter import ttk
 
 
-APP_TITLE = "Live Interpreter"
+APP_VERSION = "0.3.0"
+APP_TITLE = f"Live Interpreter v{APP_VERSION}"
 ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr_py38"))
 ENV_PYTHON = ENV_ROOT / "python.exe"
 FFMPEG = ENV_ROOT / "Library" / "bin" / "ffmpeg.exe"
@@ -29,6 +30,17 @@ LOOPBACK_LABEL = "默认电脑声音 (WASAPI Loopback)"
 LOOPBACK_DEVICE = "__wasapi_loopback__"
 EDGE_TAB_LABEL = "Edge 当前标签页 (浏览器扩展)"
 EDGE_TAB_DEVICE = "__edge_tab_audio__"
+MODEL_PRICING_URL = "https://help.aliyun.com/zh/model-studio/model-pricing"
+# Beijing standard prices (CNY / million text tokens), checked 2026-10-25.
+MT_PRICES = (
+    ("qwen-mt-lite", "qwen-mt-lite", 0.60, 1.60),
+    ("qwen-mt-flash", "qwen-mt-flash", 0.70, 1.95),
+    ("qwen-mt-plus", "qwen-mt-plus", 1.80, 5.40),
+    ("qwen3.8-flash", "qwen3.8-flash", 0.80, 2.70),
+    ("qwen3.8-max", "qwen3.8-max", 12.00, 36.00),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（忙时）", 2.00, 8.00),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（闲时）", 1.00, 4.00),
+)
 
 
 def app_dir() -> Path:
@@ -89,6 +101,7 @@ def runtime_script_path() -> Path:
     script = copy_runtime_asset("live_interpreter.py")
     copy_runtime_asset("gummy_realtime_worker.py")
     copy_runtime_asset("qwen_livetranslate_worker.py")
+    copy_runtime_asset("paraformer_mt_worker.py")
     return script
 
 
@@ -191,7 +204,8 @@ class Launcher:
         self.audio_device = StringVar()
         self.source_language = StringVar(value="ja")
         self.target_language = StringVar(value="Chinese")
-        self.asr_engine = StringVar(value="qwen3.5-live")
+        self.asr_engine = StringVar(value=os.environ.get("LIVE_INTERPRETER_ASR_ENGINE", "paraformer-mt"))
+        self.mt_model = StringVar(value=os.environ.get("LIVE_INTERPRETER_MT_MODEL", "qwen-mt-plus"))
         self.aliyun_api_key = StringVar(value=os.environ.get("DASHSCOPE_API_KEY", ""))
         self.aliyun_workspace_id = StringVar(
             value=os.environ.get("DASHSCOPE_WORKSPACE_ID", "")
@@ -243,29 +257,32 @@ class Launcher:
         language_box.grid(row=1, column=1, sticky="ew", pady=5)
         language_box.columnconfigure(1, weight=1)
         ttk.Label(language_box, text="source").grid(row=0, column=0, sticky="w", padx=(0, 6))
-        ttk.Combobox(
+        self.source_combo = ttk.Combobox(
             language_box,
             textvariable=self.source_language,
             values=("ja", "auto", "en", "zh", "ko", "yue"),
             state="readonly",
             width=8,
-        ).grid(row=0, column=1, sticky="w", padx=(0, 14))
+        )
+        self.source_combo.grid(row=0, column=1, sticky="w", padx=(0, 14))
         ttk.Label(language_box, text="target").grid(row=0, column=2, sticky="w", padx=(0, 6))
         ttk.Entry(language_box, textvariable=self.target_language).grid(row=0, column=3, sticky="ew")
         asr_box = ttk.Frame(settings)
         asr_box.grid(row=1, column=2, sticky="e", padx=(8, 0), pady=5)
         ttk.Label(asr_box, text="ASR").pack(side=LEFT, padx=(0, 6))
-        ttk.Combobox(
+        asr_combo = ttk.Combobox(
             asr_box,
             textvariable=self.asr_engine,
             values=(
-                ("qwen3.5-live", "gummy")
+                ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt")
                 if getattr(sys, "frozen", False)
-                else ("qwen3.5-live", "gummy", "sensevoice", "streaming")
+                else ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "sensevoice", "streaming")
             ),
             state="readonly",
             width=15,
-        ).pack(side=LEFT)
+        )
+        asr_combo.pack(side=LEFT)
+        asr_combo.bind("<<ComboboxSelected>>", self.update_model_controls)
 
         ttk.Label(settings, text="阿里云 API Key").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=5)
         cloud_box = ttk.Frame(settings)
@@ -275,9 +292,8 @@ class Launcher:
             row=0, column=0, sticky="ew"
         )
         ttk.Label(cloud_box, text="断句静音(ms)").grid(row=0, column=1, padx=(14, 6))
-        ttk.Entry(cloud_box, textvariable=self.gummy_max_end_silence, width=8).grid(
-            row=0, column=2, sticky="e"
-        )
+        self.silence_entry = ttk.Entry(cloud_box, textvariable=self.gummy_max_end_silence, width=8)
+        self.silence_entry.grid(row=0, column=2, sticky="e")
         ttk.Label(cloud_box, text="Workspace ID").grid(row=1, column=0, sticky="w", pady=(6, 0))
         workspace_row = ttk.Frame(cloud_box)
         workspace_row.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(3, 0))
@@ -293,6 +309,18 @@ class Launcher:
             state="readonly",
             width=11,
         ).grid(row=0, column=2)
+
+        mt_row = ttk.Frame(cloud_box)
+        mt_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(7, 0))
+        ttk.Label(mt_row, text="翻译模型").pack(side=LEFT, padx=(0, 8))
+        self.mt_combo = ttk.Combobox(
+            mt_row, textvariable=self.mt_model,
+            values=("qwen-mt-lite", "qwen-mt-flash", "qwen-mt-plus",
+                    "qwen3.8-flash", "qwen3.8-max", "deepseek-v4.1-flash-1017"),
+            state="readonly", width=32,
+        )
+        self.mt_combo.pack(side=LEFT, fill="x", expand=True)
+        ttk.Button(mt_row, text="收费对比", command=self.show_model_pricing).pack(side=LEFT, padx=(8, 0))
 
         small = ttk.Frame(settings)
         small.grid(row=3, column=1, sticky="ew", pady=5)
@@ -327,11 +355,14 @@ class Launcher:
 
         visual_check = ttk.Frame(settings)
         visual_check.grid(row=6, column=1, columnspan=2, sticky="w", pady=(0, 7))
-        ttk.Checkbutton(
+        self.visual_button = ttk.Checkbutton(
             visual_check,
             text="画面辅助（每秒上传约 1 张 Edge 当前标签页截图）",
             variable=self.visual_enabled,
-        ).pack(side=LEFT)
+        )
+        self.visual_button.pack(side=LEFT)
+        self.model_note = ttk.Label(settings)
+        self.model_note.grid(row=7, column=1, columnspan=2, sticky="w")
 
         actions = ttk.Frame(root)
         actions.pack(fill="x", pady=(0, 10))
@@ -350,6 +381,91 @@ class Launcher:
         self.log_text.heading("line", text="日志")
         self.log_text.column("line", width=720, anchor="w")
         self.log_text.pack(fill=BOTH, expand=True)
+        self.update_model_controls()
+
+    def update_model_controls(self, event=None) -> None:
+        is_qwen38 = self.asr_engine.get() == "qwen3.8-live"
+        is_paraformer_mt = self.asr_engine.get() == "paraformer-mt"
+        if is_paraformer_mt:
+            self.aliyun_region.set("beijing")
+            self.visual_enabled.set(False)
+        self.visual_button.configure(state="disabled" if is_paraformer_mt else "normal")
+        self.mt_combo.configure(state="readonly" if is_paraformer_mt else "disabled")
+        if is_qwen38:
+            self.source_language.set("auto")
+        self.source_combo.configure(state="disabled" if is_qwen38 else "readonly")
+        self.silence_entry.configure(state="disabled" if is_qwen38 else "normal")
+        self.model_note.configure(text=(
+            "Paraformer：仅北京；翻译模型可选；通用大模型关闭深度思考。"
+            if is_paraformer_mt else "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
+        ))
+
+    def show_model_pricing(self) -> Toplevel:
+        previous = getattr(self, "pricing_window", None)
+        if previous is not None and previous.winfo_exists():
+            previous.lift()
+            return previous
+        dialog = self.pricing_window = Toplevel(self.root)
+        dialog.title("翻译模型收费对比 · 阿里云百炼北京")
+        dialog.geometry("960x460")
+        dialog.minsize(900, 460)
+        dialog.transient(self.root)
+        ttk.Label(
+            dialog, text="北京地域标准价 · 更新于 2026-10-25 · 适用于 Paraformer + 文本翻译模式",
+        ).pack(anchor="w", padx=14, pady=(14, 6))
+        ttk.Label(
+            dialog, text="输入/输出单价：元/百万 Token；小时费用：元/小时。选择一行，点击“使用选中模型”。",
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+        table = ttk.Treeview(
+            dialog, columns=("model", "input", "output", "translation", "total"),
+            show="headings", selectmode="browse", height=len(MT_PRICES),
+        )
+        for column, title, width in (
+            ("model", "翻译模型", 300), ("input", "输入单价", 100),
+            ("output", "输出单价", 100), ("translation", "翻译费估算/小时", 150),
+            ("total", "识别+翻译估算/小时", 170),
+        ):
+            table.heading(column, text=title)
+            table.column(column, width=width, minwidth=width, anchor="w" if column == "model" else "center")
+        for index, (model, label, input_price, output_price) in enumerate(MT_PRICES):
+            translation_hour = (12032 * input_price + 2008 * output_price) / 1_000_000 * 3600 / 887
+            table.insert("", END, iid=str(index), values=(
+                label, f"{input_price:.2f}", f"{output_price:.2f}",
+                f"{translation_hour:.3f}", f"{translation_hour + 0.864:.3f}",
+            ))
+        current = next((str(i) for i, row in enumerate(MT_PRICES) if row[0] == self.mt_model.get()), "2")
+        table.selection_set(current)
+        table.focus(current)
+        table.pack(fill=BOTH, expand=True, padx=14)
+        for note in (
+            "统一样本：887 秒音频、12,032 输入 Token、2,008 输出 Token；识别费按 0.00024 元/秒（0.864 元/小时）计。",
+            "小时费用仅供同 Token 比较；通用模型含上下文，实际用量可能更高。未计免费额度、缓存优惠，以阿里云账单为准。",
+            "DeepSeek 忙时 08:00–22:00，闲时 22:00–次日 08:00（北京时间）；两行是同一模型，价格自动按时段生效。",
+        ):
+            ttk.Label(dialog, text=note, wraplength=870).pack(anchor="w", padx=14, pady=(6, 0))
+        status = ttk.Label(dialog, text="应用后将切换到 Paraformer-Realtime-V2 + 选中模型（北京地域）。")
+        status.pack(anchor="w", padx=14, pady=(8, 0))
+
+        def apply_selection() -> None:
+            if self.is_running():
+                status.configure(text="同传运行中，请先在主窗口停止同传，再应用选中的模型。")
+                return
+            selected = table.selection()
+            if not selected:
+                return
+            model = MT_PRICES[int(selected[0])][0]
+            self.mt_model.set(model)
+            self.asr_engine.set("paraformer-mt")
+            self.update_model_controls()
+            self.add_log(f"已选择 Paraformer-Realtime-V2 + {model}；点击“启动同传”后生效。")
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.pack(fill="x", padx=14, pady=12)
+        ttk.Button(buttons, text="查看官方价格", command=lambda: webbrowser.open(MODEL_PRICING_URL)).pack(side=LEFT)
+        ttk.Button(buttons, text="关闭", command=dialog.destroy).pack(side=RIGHT)
+        ttk.Button(buttons, text="使用选中模型", command=apply_selection).pack(side=RIGHT, padx=(0, 8))
+        return dialog
 
     def refresh_devices(self) -> None:
         try:
@@ -392,11 +508,13 @@ class Launcher:
         source_language = self.source_language.get() or "auto"
         asr_engine = self.asr_engine.get() or "qwen3.5-live"
         edge_tab_audio = self.audio_device.get() == EDGE_TAB_LABEL
-        cloud_engines = {"qwen3.5-live", "gummy"}
+        cloud_engines = {"qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt"}
         if edge_tab_audio and asr_engine not in cloud_engines:
             asr_engine = "qwen3.5-live"
             self.asr_engine.set(asr_engine)
             self.add_log("Edge 标签页音频使用云端实时翻译，已自动切换到 Qwen3.5。")
+        if asr_engine == "qwen3.8-live":
+            source_language = "auto"
         if asr_engine == "streaming" and source_language not in ("zh", "cn", "Chinese", "chinese"):
             asr_engine = "sensevoice"
             self.asr_engine.set("sensevoice")
@@ -479,9 +597,11 @@ class Launcher:
             cmd.append("--overlay-hide-source")
         if self.record_screen.get():
             cmd.append("--record-screen")
-        cmd.append("--visual-input" if self.visual_enabled.get() else "--no-visual-input")
+        cmd.append("--visual-input" if self.visual_enabled.get() and asr_engine != "paraformer-mt" else "--no-visual-input")
         if not self.translate_enabled.get():
             cmd.extend(["--translation-engine", "none"])
+        if asr_engine == "paraformer-mt":
+            cmd.extend(["--mt-model", self.mt_model.get() or "qwen-mt-plus"])
         return cmd
 
     def audio_test_command(self) -> list[str]:
@@ -536,13 +656,18 @@ class Launcher:
         if self.audio_device.get() == EDGE_TAB_LABEL and selected_engine not in {
             "gummy",
             "qwen3.5-live",
+            "qwen3.8-live",
+            "paraformer-mt",
         }:
             selected_engine = "qwen3.5-live"
-        if selected_engine in {"gummy", "qwen3.5-live"} and not self.aliyun_api_key.get().strip():
+        if selected_engine in {"gummy", "qwen3.5-live", "qwen3.8-live", "paraformer-mt"} and not self.aliyun_api_key.get().strip():
             messagebox.showwarning(APP_TITLE, "请先填写阿里云百炼 API Key。")
             return False
-        if selected_engine == "qwen3.5-live" and not self.aliyun_workspace_id.get().strip():
-            messagebox.showwarning(APP_TITLE, "Qwen3.5 LiveTranslate 还需要填写 Workspace ID。")
+        if selected_engine == "paraformer-mt" and self.aliyun_region.get() != "beijing":
+            messagebox.showwarning(APP_TITLE, "Paraformer-Realtime-V2 仅支持北京地域，请使用北京 API Key。")
+            return False
+        if selected_engine in {"qwen3.5-live", "qwen3.8-live"} and not self.aliyun_workspace_id.get().strip():
+            messagebox.showwarning(APP_TITLE, "Qwen LiveTranslate 还需要填写 Workspace ID。")
             return False
         try:
             port = int(self.port.get() or "8765")
@@ -595,12 +720,15 @@ class Launcher:
             return False
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        if self.asr_engine.get() == "qwen3.5-live":
-            self.add_log("已启动同传，正在连接 Qwen3.5 LiveTranslate（仅文本）...")
+        if self.asr_engine.get() in {"qwen3.5-live", "qwen3.8-live"}:
+            model_name = self.asr_engine.get().replace("qwen", "Qwen").replace("-live", " LiveTranslate")
+            self.add_log(f"已启动同传，正在连接 {model_name}（仅文本）...")
             if self.visual_enabled.get() and self.audio_device.get() == EDGE_TAB_LABEL:
                 self.add_log("画面辅助已开启：Edge 插件将每秒上传约 1 张当前标签页截图。")
         elif self.asr_engine.get() == "gummy":
             self.add_log("已启动同传，正在连接阿里云 Gummy 实时翻译...")
+        elif self.asr_engine.get() == "paraformer-mt":
+            self.add_log(f"已启动 Paraformer-Realtime-V2 + {self.mt_model.get()}；仅句末翻译，日志：paraformer_mt.jsonl")
         else:
             self.add_log("已启动同传，正在加载本地模型和字幕服务...")
         threading.Thread(target=self.read_process_output, daemon=True).start()
@@ -614,13 +742,20 @@ class Launcher:
             return
         self.add_log("正在停止...")
         try:
-            if os.name == "nt":
-                proc.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                proc.terminate()
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{int(self.port.get() or '8765')}/shutdown",
+                data=b"", headers={"X-Live-Interpreter": "edge-extension"}, method="POST",
+            )
+            urllib.request.urlopen(request, timeout=2).close()
         except Exception:
-            proc.terminate()
-        deadline = time.time() + 8
+            try:
+                if os.name == "nt":
+                    proc.send_signal(signal.CTRL_BREAK_EVENT)
+                else:
+                    proc.terminate()
+            except Exception:
+                proc.terminate()
+        deadline = time.time() + 15
         while proc.poll() is None and time.time() < deadline:
             time.sleep(0.2)
         if proc.poll() is None:

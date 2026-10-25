@@ -1,10 +1,24 @@
 # 电脑画面和声音同声传译工具
 
-这个目录包含一个电脑同传工具，可以采集电脑音频，实时识别、翻译，并把字幕显示在透明置顶窗口中。默认使用阿里云 Qwen3.5 LiveTranslate 实时文本翻译，也保留 Gummy 和 FunASR 本地识别模式。
+这个目录包含一个电脑同传工具，可以采集电脑音频，实时识别、翻译，并把字幕显示在透明置顶窗口中。v0.3.0 图形界面默认使用阿里云 Paraformer-Realtime-V2 + Qwen-MT-Plus，也保留 Qwen3.5 / Qwen3.8 LiveTranslate、Gummy 和 FunASR 本地识别模式。
+
+v0.3.0 新增 `qwen3.8-live`：在启动器的 ASR 下拉框中选择，填写北京或新加坡地域对应的 API Key 和 Workspace ID。该模式自动识别源语言、自动分句，原文识别始终开启，仅请求文字输出；source 和断句静音控件不适用于此模式。支持 Edge 当前标签页、画面辅助和桌面字幕，仍可切回 `qwen3.5-live` 对比测试。
+
+v0.3.0 新增 `paraformer-mt`：使用 `paraformer-realtime-v2` 识别、默认 `qwen-mt-plus` 翻译，可切换到 `qwen-mt-lite` 等模型。选择北京地域、北京 API Key，source 设为 `ja`、target 设为 `Chinese`，断句静音初始设为 `500` 毫秒。Workspace ID 可选；填写后使用业务空间专属域名，留空使用仍可用的公共域名。支持 Edge 当前标签页和默认电脑声音，仅处理音频，不上传画面；未结束的句子只更新原文，确认句末后只翻译一次，不自动重试付费翻译请求。关闭“启用翻译”时只做识别。
+
+此模式的最终原文、译文、翻译耗时、请求 Token 和每个会话的用量汇总保存到工作目录 `paraformer_mt.jsonl`（2 MB 轮换，保留两个备份）；重连原因仍在 `cloud_recovery.log`。汇总中的 `audio_sent_seconds` 是本机上传量，`asr_billed_seconds` 是服务端最后报告的时长，最终扣费以阿里云账单为准。鉴权或模型配置错误会停止本模式；临时翻译失败会显示原文并记入日志。
+
+v0.3.0 在 `paraformer-mt` 下增加“翻译模型”下拉框：`qwen-mt-lite`、`qwen-mt-flash`、`qwen-mt-plus`、`qwen3.8-flash`、`qwen3.8-max`、`deepseek-v4.1-flash-1017`。默认推荐先测试 `qwen-mt-plus`；所有选项均通过阿里云百炼调用，使用原有北京 API Key，具体模型需在该业务空间具备权限。通用大模型关闭深度思考，仅返回当前句译文，并携带最近两句已确认字幕作为参考（每句原文和译文分别最多 240 字符）；不会累计发送整场历史。更多上下文与不同模型的分词会改变输入用量，不能按 Lite 的实测 Token 直接当作升级后的实际费用。工作进程参数为 `--mt-model`，日志中的 `model`、`translation_model` 记录实际选择。
+
+“翻译模型”旁的“收费对比”可查看已接入模型的输入/输出单价、统一样本的每小时费用估算，并点击“使用选中模型”切换到 Paraformer + 对应翻译模型；运行中需先停止同传。价格为 2026-10-25 北京地域快照，可从窗口打开官方价格页核对。估算未计免费额度或缓存优惠，通用模型的上下文及分词差异会改变实际费用。DeepSeek 的忙闲价格自动按北京时间生效，两行对应同一模型，无法手动选择价格时段。
 
 ## Windows 安装版
 
-下载 `LiveInterpreter-Setup-v0.2.2.exe` 后直接安装。安装版自带 Python 运行时、透明字幕界面、Edge 扩展和云端连接组件，不需要安装 Conda、Python、FFmpeg 或本地模型。
+从 [GitHub 最新发行版](https://github.com/starry335/live-interpreter/releases/latest) 下载 `LiveInterpreter-Setup-v0.3.0.exe` 后直接安装。安装版自带 Python 运行时、透明字幕界面、Edge 扩展和云端连接组件，不需要安装 Conda、Python、FFmpeg 或本地模型。
+
+升级前先停止同传并关闭旧版软件，然后覆盖安装。免安装版请完整解压到新目录，从 `launcher/LiveInterpreter.exe` 启动。Edge 扩展更新后请在扩展管理页重新加载，并刷新视频标签页。默认组合仅支持北京地域；需要自己的百炼 API Key，Workspace ID 可选，模型须具备调用权限。切回 Qwen LiveTranslate 时仍需填写 Workspace ID。
+
+更新公告可在仓库 Releases 查看；也可在 GitHub 点击 Watch → Custom → Releases 订阅发布通知。旧版没有内置推送通道，发布不会自动更新已安装的软件。
 
 `v0.2.2` 支持云端工作进程异常后的自动重连，退避间隔为 1、2、4、8、16、30 秒，稳定运行一分钟后重置退避。重连期间本地 HTTP 服务和字幕窗口持续运行，已有字幕的停留计时暂停；恢复后从当前实时音频继续翻译，不补播断线期间的音频。每次新连接使用独立会话编号，重复句子不会覆盖旧字幕。
 
@@ -12,13 +26,14 @@
 
 安装版支持：
 
-- 阿里云 `Qwen3.5 LiveTranslate` 实时文本同传和画面辅助。
+- 阿里云 `Qwen3.5 / Qwen3.8 LiveTranslate` 实时文本同传和画面辅助。
 - 阿里云 `Gummy Realtime` 实时语音翻译。
+- 阿里云 `Paraformer-Realtime-V2` + 六种可选文本翻译模型，附收费对比与模型选择入口。
 - Windows 默认电脑声音（WASAPI Loopback）。
 - Edge 当前标签页独立音频、网页内字幕和可选画面辅助。
 - 桌面透明字幕悬浮窗。
 
-启动后直接填写阿里云百炼 API Key；Qwen3.5 还需要填写同地域的 Workspace ID。凭证只传给本次后台进程，不写入安装目录或仓库。
+启动后直接填写阿里云百炼 API Key；Qwen LiveTranslate 还需要填写同地域的 Workspace ID。凭证只传给本次后台进程，不写入安装目录或仓库。
 
 安装版不包含 FunASR、Nemotron、本地 Qwen 模型和屏幕录制所需的 FFmpeg。这些本地开发功能仍可从源码运行，并通过环境变量指定已有环境：
 
@@ -51,7 +66,7 @@ Live Interpreter
 
 扩展只发送当前标签页的 16 kHz 单声道音频，不会采集桌面或其他软件的声音。直播软件只需选择该 Edge 窗口；字幕已在网页内部，因此无需显示器采集。原生全屏同样支持，画中画窗口不支持页面字幕覆盖。
 
-启用“画面辅助”后，扩展还会把当前标签页画面压缩为最长边 960px 的 JPEG，约每秒上传 1 张，为 Qwen3.5 LiveTranslate 提供动画角色、屏幕文字和场景上下文。关闭该选项时扩展不会申请视频轨道，也不会上传截图。画面辅助只在 `qwen3.5-live` 与 Edge 当前标签页模式组合下生效。
+启用“画面辅助”后，扩展还会把当前标签页画面压缩为最长边 960px 的 JPEG，约每秒上传 1 张，为 Qwen LiveTranslate 提供动画角色、屏幕文字和场景上下文。关闭该选项时扩展不会申请视频轨道，也不会上传截图。画面辅助只在 `qwen3.5-live` 或 `qwen3.8-live` 与 Edge 当前标签页模式组合下生效。
 
 使用 Qwen3.5 LiveTranslate 前，在启动器中填写同一阿里云百炼地域下的 API Key、Workspace ID，并选择 `beijing` 或 `singapore`。凭证只会传入本次运行的子进程，不会保存到项目文件。该模式固定请求纯文本输出，不会生成或播放中文语音。
 
@@ -151,6 +166,7 @@ Qwen3.5 LiveTranslate 和 Gummy 模式会持续发送 16 kHz 单声道 PCM，并
 --source-language auto      源语言，支持 auto/zh/en/ja/ko/yue
 --target-language Chinese   翻译目标语言
 --asr-engine qwen3.5-live   阿里云 Qwen3.5 LiveTranslate 实时文本翻译（默认）
+--asr-engine qwen3.8-live   阿里云 Qwen3.8 LiveTranslate 实时文本翻译（源语言自动识别）
 --aliyun-workspace-id xxx   阿里云百炼 Workspace ID
 --aliyun-region beijing     服务地域，可选 beijing/singapore
 --visual-input              启用 Edge 当前标签页低频画面辅助

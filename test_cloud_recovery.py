@@ -19,6 +19,20 @@ from live_interpreter import (
 
 
 class CloudRecoveryTests(unittest.TestCase):
+    def test_qwen38_routes_to_qwen_worker_with_model_and_visual_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = parse_args(["--asr-engine", "qwen3.8-live", "--audio-device", "__edge_tab_audio__",
+                               "--visual-input", "--work-dir", directory, "--aliyun-workspace-id", "test"])
+            stop = threading.Event()
+            with mock.patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test"}), mock.patch(
+                "live_interpreter.run_cloud_session", side_effect=lambda *unused: stop.set()
+            ) as session:
+                cloud_stream_loop(args, State(), stop, {"proc": None}, {"proc": None}, BrowserAudioInput())
+            command = session.call_args.args[6]
+            self.assertEqual(command[command.index("--model") + 1], "qwen3.8-livetranslate-flash-realtime")
+            self.assertEqual(command[command.index("--visual-file") + 1], str(Path(directory) / "visual_frame.jpg"))
+            self.assertEqual(session.call_args.args[7], "Qwen3.8 LiveTranslate")
+
     def test_backoff_is_capped(self):
         self.assertEqual([cloud_retry_delay(n) for n in range(1, 9)], [1, 2, 4, 8, 16, 30, 30, 30])
 

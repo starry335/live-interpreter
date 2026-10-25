@@ -30,6 +30,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 class GummyConnection:
+    websocket_url = GUMMY_WEBSOCKET_URL
+    engine_name = "Gummy"
+
     def __init__(self, args: argparse.Namespace, api_key: str) -> None:
         try:
             import certifi
@@ -53,7 +56,7 @@ class GummyConnection:
 
     def open(self) -> None:
         self.ws = self.websocket.create_connection(
-            GUMMY_WEBSOCKET_URL,
+            self.websocket_url,
             header=[
                 f"Authorization: Bearer {self.api_key}",
                 "User-Agent: LiveInterpreter/1.0",
@@ -68,39 +71,30 @@ class GummyConnection:
         self.ws.settimeout(10.0)
         self.receiver = threading.Thread(target=self._receive_loop, daemon=True)
         self.receiver.start()
-        self.ws.send(
-            json.dumps(
-                {
-                    "header": {
-                        "action": "run-task",
-                        "task_id": self.task_id,
-                        "streaming": "duplex",
-                    },
-                    "payload": {
-                        "task_group": "audio",
-                        "task": "asr",
-                        "function": "recognition",
-                        "model": "gummy-realtime-v1",
-                        "parameters": {
-                            "format": "pcm",
-                            "sample_rate": 16000,
-                            "source_language": self.args.source_language,
-                            "transcription_enabled": self.args.transcription_enabled,
-                            "translation_enabled": self.args.translation_enabled,
-                            "translation_target_languages": (
-                                [self.args.target_language] if self.args.translation_enabled else []
-                            ),
-                            "max_end_silence": max(200, min(6000, self.args.max_end_silence)),
-                        },
-                        "input": {},
-                    },
-                },
-                ensure_ascii=False,
-            )
-        )
+        self.ws.send(json.dumps(self.task_request(), ensure_ascii=False))
         if not self.started.wait(timeout=20) or self.failed.is_set():
-            raise RuntimeError(self.error or "Timed out waiting for Gummy task-started.")
+            raise RuntimeError(self.error or f"Timed out waiting for {self.engine_name} task-started.")
         emit({"event": "ready", "task_id": self.task_id})
+
+    def task_request(self) -> Dict[str, object]:
+        return {
+            "header": {"action": "run-task", "task_id": self.task_id, "streaming": "duplex"},
+            "payload": {
+                "task_group": "audio", "task": "asr", "function": "recognition",
+                "model": "gummy-realtime-v1",
+                "parameters": {
+                    "format": "pcm", "sample_rate": 16000,
+                    "source_language": self.args.source_language,
+                    "transcription_enabled": self.args.transcription_enabled,
+                    "translation_enabled": self.args.translation_enabled,
+                    "translation_target_languages": (
+                        [self.args.target_language] if self.args.translation_enabled else []
+                    ),
+                    "max_end_silence": max(200, min(6000, self.args.max_end_silence)),
+                },
+                "input": {},
+            },
+        }
 
     def _receive_loop(self) -> None:
         while not self.finished.is_set():
@@ -188,7 +182,7 @@ class GummyConnection:
 
     def send_audio(self, data: bytes) -> None:
         if self.failed.is_set() or self.finished.is_set():
-            raise RuntimeError(self.error or "Gummy task failed.")
+            raise RuntimeError(self.error or f"{self.engine_name} task failed.")
         self.ws.send_binary(data)
 
     def close(self) -> None:

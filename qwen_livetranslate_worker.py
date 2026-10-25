@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 
 
 MODEL = "qwen3.5-livetranslate-flash-realtime"
+MODEL_38 = "qwen3.8-livetranslate-flash-realtime"
 REGION_HOSTS = {
     "beijing": "cn-beijing.maas.aliyuncs.com",
     "singapore": "ap-southeast-1.maas.aliyuncs.com",
@@ -24,7 +25,8 @@ def emit(payload: Dict[str, object]) -> None:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Qwen3.5 LiveTranslate realtime text worker.")
+    parser = argparse.ArgumentParser(description="Qwen LiveTranslate realtime text worker.")
+    parser.add_argument("--model", choices=[MODEL, MODEL_38], default=MODEL)
     parser.add_argument("--source-language", default="ja")
     parser.add_argument("--target-language", default="zh")
     parser.add_argument("--silence-duration-ms", type=int, default=500)
@@ -50,6 +52,12 @@ def image_event(data: bytes) -> Dict[str, object]:
 
 
 def session_config(args: argparse.Namespace) -> Dict[str, object]:
+    if args.model == MODEL_38:
+        return {
+            "output_modalities": ["text"],
+            "translation": {"language": args.target_language},
+            "audio": {"input": {"turn_detection": {"type": "speaker_detection", "threshold": 0.5}}},
+        }
     transcription: Dict[str, object] = {"model": "qwen3-asr-flash-realtime"}
     if args.source_language != "auto":
         transcription["language"] = args.source_language
@@ -73,6 +81,8 @@ class ResultNormalizer:
         self.current_sentence = "0"
         self.response_sentences: Dict[str, str] = {}
         self.item_sentences: Dict[str, str] = {}
+        self.source_text: Dict[str, str] = {}
+        self.translation_text: Dict[str, str] = {}
 
     def _new_sentence(self) -> str:
         self.sequence += 1
@@ -87,13 +97,29 @@ class ResultNormalizer:
     def handle(self, message: Dict[str, object]) -> List[Dict[str, object]]:
         event_type = str(message.get("type") or "")
         if event_type == "input_audio_buffer.speech_started":
-            self._new_sentence()
+            sentence_id = self._new_sentence()
+            item_id = str(message.get("item_id") or "")
+            if item_id:
+                self.item_sentences[item_id] = sentence_id
+            return []
+
+        if event_type == "conversation.item.created":
+            item = message.get("item") or {}
+            source_id = str(message.get("previous_item_id") or "")
+            if isinstance(item, dict) and item.get("role") == "assistant" and item.get("id") and source_id:
+                self.item_sentences[str(item["id"])] = self.item_sentences.setdefault(source_id, self._current())
             return []
 
         if event_type.startswith("conversation.item.input_audio_transcription."):
             item_id = str(message.get("item_id") or "")
             sentence_id = self.item_sentences.setdefault(item_id, self._current())
-            text = event_text(message)
+            if event_type.endswith(".delta"):
+                text = self.source_text.get(item_id, "") + str(message.get("delta") or "")
+                self.source_text[item_id] = text
+            else:
+                text = event_text(message)
+            if event_type.endswith(".completed"):
+                self.source_text.pop(item_id, None)
             if not text:
                 return []
             return [
@@ -115,8 +141,16 @@ class ResultNormalizer:
 
         if event_type in {"response.text.text", "response.text.delta", "response.text.done"}:
             response_id = str(message.get("response_id") or "")
-            sentence_id = self.response_sentences.setdefault(response_id, self._current())
-            text = event_text(message)
+            item_id = str(message.get("item_id") or "")
+            sentence_id = self.item_sentences.get(item_id) or self.response_sentences.setdefault(response_id, self._current())
+            text_key = item_id or response_id
+            if event_type.endswith(".delta"):
+                text = self.translation_text.get(text_key, "") + str(message.get("delta") or "")
+                self.translation_text[text_key] = text
+            else:
+                text = event_text(message)
+            if event_type.endswith(".done"):
+                self.translation_text.pop(text_key, None)
             if not text:
                 return []
             return [
@@ -160,7 +194,7 @@ class QwenLiveConnection:
         if not workspace_id:
             raise RuntimeError("Missing Alibaba Cloud Workspace ID.")
         host = REGION_HOSTS[self.args.region]
-        url = f"wss://{workspace_id}.{host}/api-ws/v1/realtime?model={MODEL}"
+        url = f"wss://{workspace_id}.{host}/api-ws/v1/realtime?model={self.args.model}"
         self.ws = self.websocket.create_connection(
             url,
             header=[
@@ -186,7 +220,7 @@ class QwenLiveConnection:
         if self.args.visual_file:
             self.visual_sender = threading.Thread(target=self._visual_loop, daemon=True)
             self.visual_sender.start()
-        emit({"event": "ready", "model": MODEL})
+        emit({"event": "ready", "model": self.args.model})
 
     def _send(self, payload: Dict[str, object]) -> None:
         with self.send_lock:
