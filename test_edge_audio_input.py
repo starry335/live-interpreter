@@ -1,3 +1,4 @@
+import json
 import threading
 import tempfile
 import unittest
@@ -55,6 +56,21 @@ class EdgeAudioInputTest(unittest.TestCase):
     def test_shutdown_signals_backend(self) -> None:
         self.assertEqual(self.post("/shutdown"), 204)
         self.assertTrue(self.stop_event.is_set())
+
+    def test_transparent_source_shares_subtitles_without_debug_or_audio(self) -> None:
+        self.state.upsert_event("sentence", source="こんにちは", translated="你好", final=True)
+        with urllib.request.urlopen(self.base_url + "/overlay") as response:
+            page = response.read().decode("utf-8")
+        self.assertIn("background:transparent", page)
+        self.assertNotIn("<header>", page)
+        self.assertNotIn("等待识别结果", page)
+        self.assertIn("translation.textContent", page)
+        with urllib.request.urlopen(self.base_url + "/overlay-state") as response:
+            data = json.load(response)
+        self.assertEqual(data, {"text": "你好", "source": "", "font_size": 32})
+        self.state.clear_events()
+        with urllib.request.urlopen(self.base_url + "/overlay-state") as response:
+            self.assertEqual(json.load(response)["text"], "")
 
     def test_visual_frame_is_written_after_capture_starts(self) -> None:
         frame = b"\xff\xd8visual-jpeg\xff\xd9"

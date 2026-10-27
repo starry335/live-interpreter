@@ -12,9 +12,27 @@ v0.3.0 在 `paraformer-mt` 下增加“翻译模型”下拉框：`qwen-mt-lite`
 
 “翻译模型”旁的“收费对比”可查看已接入模型的输入/输出单价、统一样本的每小时费用估算，并点击“使用选中模型”切换到 Paraformer + 对应翻译模型；运行中需先停止同传。价格为 2026-10-25 北京地域快照，可从窗口打开官方价格页核对。估算未计免费额度或缓存优惠，通用模型的上下文及分词差异会改变实际费用。DeepSeek 的忙闲价格自动按北京时间生效，两行对应同一模型，无法手动选择价格时段。
 
+## OBS / 直播姬透明字幕输出（v0.3.1）
+
+新增“直播透明窗口（免抠像）”：背景像素的 Alpha 为 0，文字和抗锯齿边缘具有各自的 Alpha；使用 Windows 原生逐像素透明窗口，不依赖 Edge 扩展。窗口标题固定为 `Live Interpreter Subtitles`，后台进程是 `LiveInterpreterBackend.exe`，并作为普通应用窗口参与枚举。
+
+1. 音频设备选“默认电脑声音 (WASAPI Loopback)”，勾选“桌面字幕窗口”，字幕模式选“直播透明窗口（免抠像）”。
+2. 字号可先调到 32，点击“预览字幕窗口”。预览只是本地中英文样例，不需要 API Key、不采集声音、不调用模型。
+3. OBS 添加“窗口捕获”，选 `[LiveInterpreterBackend.exe]: Live Interpreter Subtitles`，捕获方法明确选择 Windows 10 / Windows Graphics Capture（WGC），不要使用旧式 BitBlt 或自动猜测。移除之前的色度键和颜色键滤镜；如所用软件提供“捕获透明度/保留 Alpha”，请启用。是否有该选项以软件版本为准。
+4. 在直播预览下方放一张非黑色图片或视频，确认字幕以外的区域能透出底层画面。单独的黑色预览底板无法判断透明是否生效。
+5. 配好后填写自己的北京 API Key，点击“启动同传”。预览会关闭，由同名真实字幕窗口接替；如捕获源未自动重连，请重新选择窗口。
+
+透明窗口无标题栏或悬浮按钮；按住文字可移动位置，尺寸和字号在主窗口设置，任务栏关闭窗口或 Alt+F4 会停止该次同传。不要最小化字幕窗口。位置保存到 `alpha_window.json`，与原桌面悬浮窗分开保存。无字幕时输出完全透明，错误信息只显示在主窗口日志。
+
+**直播姬仍出现黑底时：** 其所用的窗口捕获链路可能没有保留 Alpha，不能仅靠输出窗口解决。可点击“复制透明源地址”，先启动同传，再把地址添加到直播软件内置的“浏览器/网页来源”；默认地址为 `http://127.0.0.1:8765/overlay`。这个页面直接输出透明背景和当前字幕，不显示状态、历史列表或等待提示，不需要打开 Edge、不需要安装扩展、也不需要抠像。可按 980×280 设置来源尺寸，或按直播布局调整。若直播姬版本不支持网页来源，可在 OBS 使用该透明来源完成合成。检查实际直播合成画面，而不只是窗口本身。
+
+字幕模式仅保留“桌面透明悬浮窗”和“直播透明窗口（免抠像）”。透明网页来源也可通过“复制透明源地址”使用。
+
+源码窗口预览：`python live_interpreter.py --preview-overlay --overlay-window-mode alpha --overlay-font-size 32`。预览不会启动 HTTP 服务，透明网页来源需在实际同传服务运行时使用。
+
 ## Windows 安装版
 
-从 [GitHub 最新发行版](https://github.com/starry335/live-interpreter/releases/latest) 下载 `LiveInterpreter-Setup-v0.3.0.exe` 后直接安装。安装版自带 Python 运行时、透明字幕界面、Edge 扩展和云端连接组件，不需要安装 Conda、Python、FFmpeg 或本地模型。
+从 [GitHub 最新发行版](https://github.com/starry335/live-interpreter/releases/latest) 下载 `LiveInterpreter-Setup-v0.3.1.exe` 后直接安装。安装版自带 Python 运行时、透明字幕界面、Edge 扩展和云端连接组件，不需要安装 Conda、Python、FFmpeg 或本地模型。
 
 升级前先停止同传并关闭旧版软件，然后覆盖安装。免安装版请完整解压到新目录，从 `launcher/LiveInterpreter.exe` 启动。Edge 扩展更新后请在扩展管理页重新加载，并刷新视频标签页。默认组合仅支持北京地域；需要自己的百炼 API Key，Workspace ID 可选，模型须具备调用权限。切回 Qwen LiveTranslate 时仍需填写 Workspace ID。
 

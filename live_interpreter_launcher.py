@@ -18,7 +18,7 @@ from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, StringVar, Tk, Toplevel,
 from tkinter import ttk
 
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 APP_TITLE = f"Live Interpreter v{APP_VERSION}"
 ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr_py38"))
 ENV_PYTHON = ENV_ROOT / "python.exe"
@@ -30,6 +30,7 @@ LOOPBACK_LABEL = "默认电脑声音 (WASAPI Loopback)"
 LOOPBACK_DEVICE = "__wasapi_loopback__"
 EDGE_TAB_LABEL = "Edge 当前标签页 (浏览器扩展)"
 EDGE_TAB_DEVICE = "__edge_tab_audio__"
+OVERLAY_MODES = {"桌面透明悬浮窗": "desktop", "直播透明窗口（免抠像）": "alpha"}
 MODEL_PRICING_URL = "https://help.aliyun.com/zh/model-studio/model-pricing"
 # Beijing standard prices (CNY / million text tokens), checked 2026-10-25.
 MT_PRICES = (
@@ -102,6 +103,7 @@ def runtime_script_path() -> Path:
     copy_runtime_asset("gummy_realtime_worker.py")
     copy_runtime_asset("qwen_livetranslate_worker.py")
     copy_runtime_asset("paraformer_mt_worker.py")
+    copy_runtime_asset("alpha_subtitle_window.py")
     return script
 
 
@@ -199,6 +201,7 @@ class Launcher:
         self.root.minsize(760, 660)
 
         self.process: subprocess.Popen | None = None
+        self.preview_process: subprocess.Popen | None = None
         self.log_queue: queue.Queue[str] = queue.Queue()
 
         self.audio_device = StringVar()
@@ -218,6 +221,8 @@ class Launcher:
         self.overlay_hold_seconds = StringVar(value="8")
         self.port = StringVar(value="8765")
         self.overlay_enabled = BooleanVar(value=True)
+        self.overlay_mode = StringVar(value=next((label for label, mode in OVERLAY_MODES.items()
+                                                if mode == os.environ.get("LIVE_INTERPRETER_OVERLAY_MODE")), "桌面透明悬浮窗"))
         self.overlay_show_source = BooleanVar(value=False)
         self.record_screen = BooleanVar(value=False)
         self.translate_enabled = BooleanVar(value=True)
@@ -341,8 +346,8 @@ class Launcher:
         ttk.Entry(settings, textvariable=self.overlay_geometry).grid(row=4, column=1, sticky="ew", pady=5)
 
         checks = ttk.Frame(settings)
-        checks.grid(row=5, column=1, columnspan=2, sticky="w", pady=7)
-        ttk.Checkbutton(checks, text="透明字幕窗口", variable=self.overlay_enabled).pack(side=LEFT, padx=(0, 18))
+        checks.grid(row=6, column=1, columnspan=2, sticky="w", pady=7)
+        ttk.Checkbutton(checks, text="桌面字幕窗口", variable=self.overlay_enabled).pack(side=LEFT, padx=(0, 18))
         ttk.Checkbutton(checks, text="显示原文", variable=self.overlay_show_source).pack(side=LEFT, padx=(0, 18))
         ttk.Checkbutton(checks, text="启用翻译", variable=self.translate_enabled).pack(side=LEFT, padx=(0, 18))
         self.record_screen_button = ttk.Checkbutton(
@@ -354,7 +359,7 @@ class Launcher:
             self.record_screen_button.configure(state="disabled")
 
         visual_check = ttk.Frame(settings)
-        visual_check.grid(row=6, column=1, columnspan=2, sticky="w", pady=(0, 7))
+        visual_check.grid(row=7, column=1, columnspan=2, sticky="w", pady=(0, 7))
         self.visual_button = ttk.Checkbutton(
             visual_check,
             text="画面辅助（每秒上传约 1 张 Edge 当前标签页截图）",
@@ -362,7 +367,16 @@ class Launcher:
         )
         self.visual_button.pack(side=LEFT)
         self.model_note = ttk.Label(settings)
-        self.model_note.grid(row=7, column=1, columnspan=2, sticky="w")
+        self.model_note.grid(row=8, column=1, columnspan=2, sticky="w")
+
+        ttk.Label(settings, text="字幕模式").grid(row=5, column=0, sticky="w", padx=(0, 10), pady=5)
+        output_row = ttk.Frame(settings)
+        output_row.grid(row=5, column=1, columnspan=2, sticky="ew", pady=5)
+        ttk.Combobox(output_row, textvariable=self.overlay_mode, values=tuple(OVERLAY_MODES),
+                     state="readonly", width=25).pack(side=LEFT)
+        ttk.Button(output_row, text="预览字幕窗口", command=self.preview_overlay).pack(side=LEFT, padx=(10, 0))
+        ttk.Button(output_row, text="复制透明源地址", command=self.copy_transparent_source).pack(side=LEFT, padx=(8, 0))
+        ttk.Label(output_row, text="预览不计费").pack(side=LEFT, padx=(8, 0))
 
         actions = ttk.Frame(root)
         actions.pack(fill="x", pady=(0, 10))
@@ -475,7 +489,7 @@ class Launcher:
             return
         self.device_combo["values"] = devices
         if devices and not self.audio_device.get():
-            preferred = EDGE_TAB_LABEL
+            preferred = LOOPBACK_LABEL if OVERLAY_MODES.get(self.overlay_mode.get()) == "alpha" else EDGE_TAB_LABEL
             self.audio_device.set(preferred)
         self.add_log(f"检测到 {len(devices)} 个音频设备")
 
@@ -569,6 +583,8 @@ class Launcher:
             "72",
             "--overlay-geometry",
             self.overlay_geometry.get() or "980x280+240+620",
+            "--overlay-window-mode",
+            OVERLAY_MODES.get(self.overlay_mode.get(), "desktop"),
             "--overlay-font-size",
             self.overlay_font_size.get() or "15",
             "--overlay-hold-seconds",
@@ -589,7 +605,7 @@ class Launcher:
             "--work-dir",
             self.work_dir.get(),
         ]
-        if edge_tab_audio or not self.overlay_enabled.get():
+        if (edge_tab_audio and OVERLAY_MODES.get(self.overlay_mode.get()) != "alpha") or not self.overlay_enabled.get():
             cmd.append("--no-overlay")
         if self.overlay_show_source.get():
             cmd.append("--overlay-show-source")
@@ -608,6 +624,47 @@ class Launcher:
         cmd = self.command()
         cmd.append("--test-audio")
         return cmd
+
+    def close_preview(self) -> None:
+        if self.preview_process and self.preview_process.poll() is None:
+            self.preview_process.terminate()
+            try:
+                self.preview_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.preview_process.kill()
+        self.preview_process = None
+
+    def copy_transparent_source(self) -> None:
+        try:
+            port = int(self.port.get() or "8765")
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(APP_TITLE, "端口必须是 1–65535 的整数。")
+            return
+        url = f"http://127.0.0.1:{port}/overlay"
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
+        self.add_log(f"已复制透明源：{url}；先启动同传，再添加到直播软件的浏览器/网页来源，无需 Edge 扩展或抠像。")
+
+    def preview_overlay(self) -> None:
+        if self.is_running():
+            messagebox.showinfo(APP_TITLE, "同传已在运行，请直接捕获实际字幕窗口；如需预览，请先停止同传。")
+            return
+        try:
+            self.close_preview()
+            env = child_environment()
+            env.pop("DASHSCOPE_API_KEY", None)
+            env.pop("DASHSCOPE_WORKSPACE_ID", None)
+            self.preview_process = subprocess.Popen(
+                [*self.command(), "--preview-overlay"], cwd=str(app_dir()), env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, creationflags=child_creation_flags(),
+            )
+            self.add_log("已打开本地字幕预览，不采集音频、不调用模型；直播字幕窗口标题为 Live Interpreter Subtitles。")
+            if OVERLAY_MODES.get(self.overlay_mode.get()) == "alpha":
+                self.add_log("透明窗口：请使用支持 Alpha 的 Windows Graphics Capture；关闭色度键，旧式捕获可能显示黑底。")
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, str(exc))
 
     def test_audio_level(self) -> None:
         if not self.audio_device.get():
@@ -704,6 +761,7 @@ class Launcher:
             workspace_id = self.aliyun_workspace_id.get().strip()
             if workspace_id:
                 env["DASHSCOPE_WORKSPACE_ID"] = workspace_id
+            self.close_preview()
             self.process = subprocess.Popen(
                 cmd,
                 cwd=str(app_dir()),
@@ -837,6 +895,7 @@ class Launcher:
             if not messagebox.askyesno(APP_TITLE, "同传仍在运行，是否停止并退出？"):
                 return
             self.stop()
+        self.close_preview()
         self.root.destroy()
 
     def run(self) -> None:

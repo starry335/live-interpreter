@@ -734,6 +734,7 @@ def make_handler(
     browser_audio: BrowserAudioInput,
     stop_event: Optional[threading.Event] = None,
     browser_visual: Optional[BrowserVisualInput] = None,
+    overlay_args: Optional[argparse.Namespace] = None,
 ):
     class Handler(BaseHTTPRequestHandler):
         def respond(self, status: int, body: bytes = b"") -> None:
@@ -745,6 +746,25 @@ def make_handler(
                 self.wfile.write(body)
 
         def do_GET(self) -> None:  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            if path == "/overlay-state":
+                snapshot = state.snapshot()
+                text, source = compose_live_subtitles(
+                    snapshot["events"], getattr(overlay_args, "overlay_live_events", 3),
+                    getattr(overlay_args, "overlay_live_max_events", 6),
+                    getattr(overlay_args, "overlay_hold_seconds", 8),
+                    getattr(overlay_args, "overlay_live_max_chars", 360), now=float(snapshot["monotonic_now"]),
+                )
+                body = json.dumps({"text": text,
+                    "source": source if getattr(overlay_args, "overlay_show_source", False) else "",
+                    "font_size": max(15, getattr(overlay_args, "overlay_font_size", 32))}, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if self.path.startswith("/events"):
                 snapshot = state.snapshot()
                 snapshot["visual_enabled"] = bool(browser_visual and browser_visual.enabled)
@@ -756,7 +776,7 @@ def make_handler(
                 self.wfile.write(body)
                 return
 
-            body = HTML_PAGE.encode("utf-8")
+            body = (TRANSPARENT_OVERLAY_PAGE if path == "/overlay" else HTML_PAGE).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -819,6 +839,34 @@ def make_handler(
             return
 
     return Handler
+
+
+TRANSPARENT_OVERLAY_PAGE = r"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Live Interpreter Transparent Subtitles</title>
+<style>
+html,body { margin:0; width:100%; height:100%; overflow:hidden; background:transparent !important; }
+body { color:white; font-family:"Microsoft YaHei UI","Segoe UI",sans-serif; }
+main { position:absolute; left:20px; right:20px; bottom:20px; }
+#translation,#source { white-space:pre-wrap; overflow-wrap:anywhere;
+  text-shadow:-1px -1px 1px #000,1px -1px 1px #000,-1px 1px 1px #000,1px 1px 1px #000; }
+#translation { font-size:32px; font-weight:700; line-height:1.35; }
+#source { font-size:20px; color:#d0d0d0; line-height:1.35; margin-bottom:12px; }
+#source:empty { display:none; }
+</style></head><body><main><div id="source"></div><div id="translation"></div></main>
+<script>
+const translation=document.getElementById('translation'), source=document.getElementById('source');
+async function refresh() {
+  try {
+    const response=await fetch('/overlay-state',{cache:'no-store'});
+    if (!response.ok) throw new Error('disconnected');
+    const data=await response.json();
+    translation.textContent=data.text || ''; source.textContent=data.source || '';
+    translation.style.fontSize=data.font_size+'px'; source.style.fontSize=Math.max(13,data.font_size*0.65)+'px';
+  } catch (error) { translation.textContent=''; source.textContent=''; }
+  setTimeout(refresh,200);
+}
+refresh();
+</script></body></html>"""
 
 
 HTML_PAGE = r"""<!doctype html>
@@ -1004,13 +1052,35 @@ def save_overlay_geometry(path: Path, geometry: Tuple[int, int, int, int]) -> No
         print(f"Could not save subtitle window position: {exc}", file=sys.stderr, flush=True)
 
 
+def configure_subtitle_window(root, args: argparse.Namespace, geometry: Tuple[int, int, int, int]) -> str:
+    from tkinter import TclError
+
+    background = "#010203"
+    width, height, x, y = geometry
+    root.title("Live Interpreter Overlay")
+    root.overrideredirect(True)
+    root.geometry(f"{width}x{height}{x:+d}{y:+d}")
+    root.minsize(480, 180)
+    root.configure(bg=background)
+    root.attributes("-topmost", True)
+    root.attributes("-alpha", args.overlay_alpha)
+    try:
+        root.wm_attributes("-transparentcolor", background)
+    except TclError:
+        pass
+    return background
+
+
 def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threading.Event) -> None:
+    if args.overlay_window_mode == "alpha":
+        from alpha_subtitle_window import run_alpha_subtitle_window
+        run_alpha_subtitle_window(args, state, stop_event)
+        return
     import tkinter as tk
     from tkinter import font as tkfont
 
     geometry_path = args.work_dir / "overlay_window.json"
     width, height, x, y = load_overlay_geometry(geometry_path, args.overlay_geometry)
-    transparent_color = "#010203"
     drag_offset = {"x": None, "y": None}
     resize_state = {
         "mode": "",
@@ -1047,17 +1117,7 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
     panel_radius = 8
 
     root = tk.Tk()
-    root.title("Live Interpreter Overlay")
-    root.overrideredirect(True)
-    root.geometry(f"{width}x{height}{x:+d}{y:+d}")
-    root.minsize(480, 180)
-    root.configure(bg=transparent_color)
-    root.attributes("-topmost", True)
-    root.attributes("-alpha", args.overlay_alpha)
-    try:
-        root.wm_attributes("-transparentcolor", transparent_color)
-    except tk.TclError:
-        pass
+    transparent_color = configure_subtitle_window(root, args, (width, height, x, y))
 
     canvas = tk.Canvas(root, bg=transparent_color, bd=0, highlightthickness=0)
     canvas.pack(fill="both", expand=True)
@@ -1574,6 +1634,7 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
     root.bind("<Button-3>", close_overlay)
     root.bind("<Escape>", hide_controls)
     canvas.bind("<Button-3>", close_overlay)
+    root.protocol("WM_DELETE_WINDOW", close_overlay)
     canvas.bind("<Configure>", lambda event: invalidate())
     root.after(100, refresh)
     root.mainloop()
@@ -2547,6 +2608,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--screen-fps", type=int, default=12)
     parser.add_argument("--overlay", dest="overlay", action="store_true", default=True)
     parser.add_argument("--no-overlay", dest="overlay", action="store_false", help="Disable the draggable overlay window.")
+    parser.add_argument("--overlay-window-mode", choices=["desktop", "alpha"], default="desktop",
+                        help="Desktop transparent overlay or per-pixel alpha window for OBS/streaming capture.")
+    parser.add_argument("--preview-overlay", action="store_true", help="Show local sample subtitles without audio or model calls.")
     parser.add_argument(
         "--overlay-geometry",
         type=parse_geometry,
@@ -2583,6 +2647,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     configure_environment()
     args = parse_args(argv)
+    if args.preview_overlay:
+        args.overlay_hold_seconds = 86400
+        state = State()
+        state.add_event("これは字幕キャプチャのテストです。", "这是字幕捕获测试：中文、English、123。", "preview")
+        state.update_event("preview", "这是字幕捕获测试：中文、English、123。")
+        state.set_status("listening: local preview")
+        run_overlay_window(args, state, threading.Event())
+        return 0
     if args.loopback_capture:
         if not args.loopback_chunks_dir:
             print("Missing --loopback-chunks-dir", file=sys.stderr)
@@ -2639,7 +2711,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     stop_event = threading.Event()
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port),
-        make_handler(state, browser_audio, stop_event, browser_visual),
+        make_handler(state, browser_audio, stop_event, browser_visual, args),
     )
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -2684,7 +2756,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             threading.Thread(target=forward_capture_output, args=(audio_proc,), daemon=True).start()
         worker.start()
         if args.overlay:
-            print("Overlay window: drag with left mouse button, right-click to exit.", flush=True)
+            print("Transparent window: Live Interpreter Subtitles; use an alpha-capable WGC capture method." if args.overlay_window_mode == "alpha"
+                  else "Overlay window: drag with left mouse button, right-click to exit.", flush=True)
             run_overlay_window(args, state, stop_event)
         else:
             while not stop_event.is_set():
