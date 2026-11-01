@@ -22,6 +22,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Tuple
 
+import hotwords
+
 
 ROOT = Path(__file__).resolve().parent
 FUNASR_ROOT = Path(os.environ.get("FUNASR_ROOT", r"E:\FunAsr"))
@@ -2164,6 +2166,12 @@ def handle_cloud_output(
             text = translated if translated is not None else source
             if text:
                 print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
+        elif event == "hotword_vocabulary":
+            print(
+                f"{engine_name} hotwords: {message.get('asr_terms')} ASR terms, "
+                f"{message.get('mt_terms')} translation terms, vocabulary={message.get('vocabulary_id')}",
+                flush=True,
+            )
         elif event in {"translation_usage", "usage_summary"}:
             print(f"{engine_name} usage: {json.dumps(message, ensure_ascii=True)}", flush=True)
         elif event == "warning":
@@ -2264,6 +2272,8 @@ def cloud_stream_loop(
             "--log-file", str(args.work_dir / "paraformer_mt.jsonl"),
             "--mt-model", args.mt_model,
         ])
+    if str(getattr(args, "hotwords", "")).strip():
+        command.extend(["--hotwords", str(Path(args.hotwords).expanduser().resolve())])
     if not is_qwen_live and args.translation_engine == "none":
         command.append("--no-translation")
 
@@ -2584,6 +2594,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--target-language", default="Chinese", help="Translation target language.")
     parser.add_argument("--translation-engine", choices=["qwen", "none"], default="qwen")
     parser.add_argument("--mt-model", default="qwen-mt-lite", help="Text translation model for paraformer-mt.")
+    parser.add_argument("--hotwords", default="", help="Hotword glossary file (.txt or kb-terms.json).")
     parser.add_argument("--device", default="auto", help="ASR device: auto, cpu, cuda:0.")
     parser.add_argument("--translate-device", default="auto", help="Translator device: auto, cpu, cuda:0.")
     parser.add_argument("--chunk-seconds", type=float, default=0.6)
@@ -2647,6 +2658,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     configure_environment()
     args = parse_args(argv)
+    if str(getattr(args, "hotwords", "")).strip():
+        try:
+            args.hotword_config = hotwords.load(args.hotwords)
+        except hotwords.HotwordError as exc:
+            print(f"Hotword file error: {exc}", file=sys.stderr)
+            return 2
+        for warning in args.hotword_config.warnings:
+            print(f"Hotword warning: {warning}", file=sys.stderr)
+        print(f"Hotwords: {args.hotword_config.summary()}", flush=True)
+    else:
+        args.hotword_config = None
     if args.preview_overlay:
         args.overlay_hold_seconds = 86400
         state = State()
@@ -2722,6 +2744,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     cloud_holder: Dict[str, Optional[subprocess.Popen]] = {"proc": None}
     screen_proc: Optional[subprocess.Popen] = None
     cloud_engines = {"gummy", "paraformer-mt", *QWEN_LIVE_MODELS}
+    if args.hotwords and args.asr_engine not in cloud_engines:
+        print("Hotwords are supported by cloud engines only; local ASR ignores this file.", file=sys.stderr, flush=True)
     if args.asr_engine in cloud_engines:
         worker = threading.Thread(
             target=cloud_stream_loop,

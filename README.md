@@ -12,6 +12,42 @@ v0.3.0 在 `paraformer-mt` 下增加“翻译模型”下拉框：`qwen-mt-lite`
 
 “翻译模型”旁的“收费对比”可查看已接入模型的输入/输出单价、统一样本的每小时费用估算，并点击“使用选中模型”切换到 Paraformer + 对应翻译模型；运行中需先停止同传。价格为 2026-10-25 北京地域快照，可从窗口打开官方价格页核对。估算未计免费额度或缓存优惠，通用模型的上下文及分词差异会改变实际费用。DeepSeek 的忙闲价格自动按北京时间生效，两行对应同一模型，无法手动选择价格时段。
 
+## 热词表（人名 / 术语）
+
+启动器新增“热词表”文件选择，命令行对应 `--hotwords`。一个 UTF-8 文本文件同时驱动五个环节：
+
+- **Paraformer 识别**：词表通过 `speech-biasing` 注册为 vocabulary，`run-task` 携带 `vocabulary_id`；识别用的词条最多 500 个，非 ASCII 词条不超过 15 字符。
+- **Qwen-MT 翻译**：当前句命中的词条以 `translation_options.terms` 下发，只发送句子里实际出现的词，避免几十个无关术语互相干扰。
+- **LiveTranslate**：词表写入 `translation.corpus.phrases`（只影响翻译，不影响转写）。
+- **通用大模型**：系统提示词附一段有上限的术语块。
+- **输出兜底**：`!错误写法 => 标准译名` 会把模型仍写错的禁写词替换掉。
+
+文本格式：
+
+```text
+# 识别 + 翻译
+あられ => 阿拉蕾
+ゆのち => 由乃亲
+ユノ
+
+# 只给翻译用的 ASR 误写 / 别名（识别侧跳过）
+~戦国ユーノ => 由乃
+~ラカマチオルレ => 阿拉蕾
+
+# 禁写输出 -> 标准译名
+!战国由乃 => 由乃
+```
+
+也支持离线翻译项目的 `kb-terms/v1` JSON（`person` / `honorific` / `works` / `gags` / `forbidden`）。仓库里的 [`hotwords/yumemita_bangdream.txt`](hotwords/yumemita_bangdream.txt) 是从该项目的短名热词库导出的示例（阿拉蕾、由乃亲、野乃花、律、都子等），可用 `tools/export_offline_hotwords.py` 重新生成。设计说明、离线评测方法和结果见 [`docs/hotwords.md`](docs/hotwords.md)。
+
+源码示例：
+
+```powershell
+python live_interpreter.py --asr-engine paraformer-mt --hotwords hotwords/yumemita_bangdream.txt --audio-device "__wasapi_loopback__"
+```
+
+热词注册失败（例如 API Key 无权限）不会中断同传：日志会提示 `ASR hotwords disabled`，翻译侧术语和输出兜底仍然生效。Gummy 模式没有热词接口，只应用输出兜底。
+
 ## OBS / 直播姬透明字幕输出（v0.3.1）
 
 新增“直播透明窗口（免抠像）”：背景像素的 Alpha 为 0，文字和抗锯齿边缘具有各自的 Alpha；使用 Windows 原生逐像素透明窗口，不依赖 Edge 扩展。窗口标题固定为 `Live Interpreter Subtitles`，后台进程是 `LiveInterpreterBackend.exe`，并作为普通应用窗口参与枚举。

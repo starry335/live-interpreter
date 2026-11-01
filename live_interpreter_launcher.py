@@ -103,6 +103,7 @@ def runtime_script_path() -> Path:
     copy_runtime_asset("gummy_realtime_worker.py")
     copy_runtime_asset("qwen_livetranslate_worker.py")
     copy_runtime_asset("paraformer_mt_worker.py")
+    copy_runtime_asset("hotwords.py")
     copy_runtime_asset("alpha_subtitle_window.py")
     return script
 
@@ -209,6 +210,7 @@ class Launcher:
         self.target_language = StringVar(value="Chinese")
         self.asr_engine = StringVar(value=os.environ.get("LIVE_INTERPRETER_ASR_ENGINE", "paraformer-mt"))
         self.mt_model = StringVar(value=os.environ.get("LIVE_INTERPRETER_MT_MODEL", "qwen-mt-plus"))
+        self.hotwords = StringVar(value=os.environ.get("LIVE_INTERPRETER_HOTWORDS", ""))
         self.aliyun_api_key = StringVar(value=os.environ.get("DASHSCOPE_API_KEY", ""))
         self.aliyun_workspace_id = StringVar(
             value=os.environ.get("DASHSCOPE_WORKSPACE_ID", "")
@@ -327,6 +329,14 @@ class Launcher:
         self.mt_combo.pack(side=LEFT, fill="x", expand=True)
         ttk.Button(mt_row, text="收费对比", command=self.show_model_pricing).pack(side=LEFT, padx=(8, 0))
 
+        hotword_row = ttk.Frame(cloud_box)
+        hotword_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(7, 0))
+        ttk.Label(hotword_row, text="热词表").pack(side=LEFT, padx=(0, 8))
+        ttk.Entry(hotword_row, textvariable=self.hotwords).pack(side=LEFT, fill="x", expand=True)
+        ttk.Button(hotword_row, text="选择", command=self.choose_hotwords).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(hotword_row, text="清除", command=lambda: self.hotwords.set("")).pack(side=LEFT, padx=(6, 0))
+        ttk.Label(hotword_row, text="txt / kb-terms.json").pack(side=LEFT, padx=(8, 0))
+
         small = ttk.Frame(settings)
         small.grid(row=3, column=1, sticky="ew", pady=5)
         small.columnconfigure((1, 3, 5, 7), weight=1)
@@ -410,8 +420,12 @@ class Launcher:
         self.source_combo.configure(state="disabled" if is_qwen38 else "readonly")
         self.silence_entry.configure(state="disabled" if is_qwen38 else "normal")
         self.model_note.configure(text=(
-            "Paraformer：仅北京；翻译模型可选；通用大模型关闭深度思考。"
-            if is_paraformer_mt else "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
+            "Paraformer：仅北京；翻译模型可选；热词同时作用于识别（vocabulary）和翻译（terms）。"
+            if is_paraformer_mt else
+            "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕；热词只作用于翻译侧。"
+            if is_qwen38 else
+            "热词在 Gummy 模式下只能做译文禁写替换，识别与术语均不生效。"
+            if self.asr_engine.get() == "gummy" else ""
         ))
 
     def show_model_pricing(self) -> Toplevel:
@@ -497,6 +511,15 @@ class Launcher:
         chosen = filedialog.askdirectory(initialdir=self.work_dir.get())
         if chosen:
             self.work_dir.set(chosen)
+
+    def choose_hotwords(self) -> None:
+        chosen = filedialog.askopenfilename(
+            title="选择热词表",
+            filetypes=[("热词表", "*.txt *.json"), ("所有文件", "*.*")],
+        )
+        if chosen:
+            self.hotwords.set(chosen)
+            self.add_log(f"热词表：{chosen}（Paraformer 模式同时作用于识别和翻译）")
 
     def open_extension_folder(self) -> None:
         path = extension_dir()
@@ -618,6 +641,12 @@ class Launcher:
             cmd.extend(["--translation-engine", "none"])
         if asr_engine == "paraformer-mt":
             cmd.extend(["--mt-model", self.mt_model.get() or "qwen-mt-plus"])
+        hotwords_path = self.hotwords.get().strip()
+        if hotwords_path:
+            resolved = Path(hotwords_path).expanduser()
+            if not resolved.is_file():
+                raise RuntimeError(f"热词表不存在：{resolved}")
+            cmd.extend(["--hotwords", str(resolved.resolve())])
         return cmd
 
     def audio_test_command(self) -> list[str]:

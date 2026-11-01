@@ -37,6 +37,7 @@ Source: "..\dist\LiveInterpreter\*"; DestDir: "{app}\launcher"; Flags: ignorever
 Source: "..\dist\LiveInterpreterBackend\*"; DestDir: "{app}\backend"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\edge_extension\*"; DestDir: "{app}\edge_extension"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\corpus.phrases"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\hotwords\*"; DestDir: "{app}\hotwords"; Flags: ignoreversion recursesubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
