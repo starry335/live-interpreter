@@ -1,5 +1,5 @@
 #define AppName "Live Interpreter"
-#define AppVersion "0.3.1"
+#define AppVersion "0.3.2"
 #define Publisher "starry335"
 #define AppUrl "https://github.com/starry335/live-interpreter"
 
@@ -37,6 +37,8 @@ Source: "..\dist\LiveInterpreter\*"; DestDir: "{app}\launcher"; Flags: ignorever
 Source: "..\dist\LiveInterpreterBackend\*"; DestDir: "{app}\backend"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\edge_extension\*"; DestDir: "{app}\edge_extension"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\corpus.phrases"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\hotwords\*"; DestDir: "{app}\hotwords"; Flags: ignoreversion recursesubdirs
+Source: "..\docs\hotwords.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

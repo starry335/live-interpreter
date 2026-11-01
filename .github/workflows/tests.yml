@@ -19,3 +19,4 @@ jobs:
       - run: python -m unittest discover -v
       - run: node --check edge_extension/service_worker.js
       - run: node --check edge_extension/offscreen.js
+      - run: node --check edge_extension/content.js

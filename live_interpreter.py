@@ -22,6 +22,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Tuple
 
+import hotwords
+
 
 ROOT = Path(__file__).resolve().parent
 FUNASR_ROOT = Path(os.environ.get("FUNASR_ROOT", r"E:\FunAsr"))
@@ -581,7 +583,7 @@ class State:
                 item["source"] = source
             if translated is not None:
                 item["translated"] = translated
-            if final and not item.get("final"):
+            if final:
                 item["final"] = True
                 item["finalized_at"] = now
             item["time"] = _dt.datetime.now().strftime("%H:%M:%S")
@@ -1069,6 +1071,37 @@ def configure_subtitle_window(root, args: argparse.Namespace, geometry: Tuple[in
     except TclError:
         pass
     return background
+
+
+def run_subtitle_mainloop(root, work_dir: Path, stop_event: threading.Event) -> None:
+    """A failed Tk callback must not leave a paid cloud session running unseen."""
+    import traceback
+
+    failures = []
+    previous_handler = root.report_callback_exception
+
+    def callback_failed(kind, error, trace):
+        failures.append(error)
+        stop_event.set()
+        detail = "".join(traceback.format_exception(kind, error, trace))
+        message = f"Subtitle window failed; stopping translation.\n{detail}"
+        print(message, file=sys.stderr, flush=True)
+        try:
+            work_dir.mkdir(parents=True, exist_ok=True)
+            with (work_dir / "overlay_error.log").open("a", encoding="utf-8") as stream:
+                stream.write(f"{_dt.datetime.now().isoformat()} {message}\n")
+        except OSError:
+            pass  # The stderr copy still reaches the launcher when the directory is unwritable.
+        finally:
+            root.destroy()
+
+    root.report_callback_exception = callback_failed
+    try:
+        root.mainloop()
+    finally:
+        root.report_callback_exception = previous_handler
+    if failures:
+        raise failures[0]
 
 
 def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threading.Event) -> None:
@@ -1637,7 +1670,7 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
     root.protocol("WM_DELETE_WINDOW", close_overlay)
     canvas.bind("<Configure>", lambda event: invalidate())
     root.after(100, refresh)
-    root.mainloop()
+    run_subtitle_mainloop(root, args.work_dir, stop_event)
 
 
 class AsrEngine:
@@ -2163,7 +2196,11 @@ def handle_cloud_output(
             label = "final" if final else "partial"
             text = translated if translated is not None else source
             if text:
+                state.set_status(f"listening ({engine_name})")
                 print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
+        elif event == "hotword_vocabulary":
+            print(f"{engine_name} hotwords: {message.get('asr_terms')} ASR terms, "
+                  f"{message.get('mt_terms')} translation terms, vocabulary={message.get('vocabulary_id')}", flush=True)
         elif event in {"translation_usage", "usage_summary"}:
             print(f"{engine_name} usage: {json.dumps(message, ensure_ascii=True)}", flush=True)
         elif event == "warning":
@@ -2264,6 +2301,10 @@ def cloud_stream_loop(
             "--log-file", str(args.work_dir / "paraformer_mt.jsonl"),
             "--mt-model", args.mt_model,
         ])
+    if args.hotwords:
+        command.extend(["--hotwords", str(Path(args.hotwords).expanduser().resolve())])
+    elif args.hotwords_file:
+        command.extend(["--hotwords-file", args.hotwords_file])
     if not is_qwen_live and args.translation_engine == "none":
         command.append("--no-translation")
 
@@ -2352,7 +2393,9 @@ def run_cloud_session(
 
     restart_count = 0
     try:
-        deadline = time.monotonic() + 25
+        # Vocabulary list/create requests can take up to 30s before the WebSocket opens.
+        startup_timeout = 65 if args.asr_engine == "paraformer-mt" and (args.hotwords or args.hotwords_file) else 25
+        deadline = time.monotonic() + startup_timeout
         while not ready.wait(0.1):
             if stop_event.is_set():
                 return
@@ -2584,6 +2627,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--target-language", default="Chinese", help="Translation target language.")
     parser.add_argument("--translation-engine", choices=["qwen", "none"], default="qwen")
     parser.add_argument("--mt-model", default="qwen-mt-lite", help="Text translation model for paraformer-mt.")
+    glossary_group = parser.add_mutually_exclusive_group()
+    glossary_group.add_argument("--hotwords-file", default="", help="Saved source/target terminology JSON file.")
+    glossary_group.add_argument("--hotwords", default="", help="External hotword glossary (.txt or JSON).")
     parser.add_argument("--device", default="auto", help="ASR device: auto, cpu, cuda:0.")
     parser.add_argument("--translate-device", default="auto", help="Translator device: auto, cpu, cuda:0.")
     parser.add_argument("--chunk-seconds", type=float, default=0.6)
@@ -2647,6 +2693,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[List[str]] = None) -> int:
     configure_environment()
     args = parse_args(argv)
+    glossary_path = args.hotwords or args.hotwords_file
+    if glossary_path and not args.preview_overlay:
+        try:
+            config = hotwords.load(glossary_path)
+        except hotwords.HotwordError as exc:
+            print(f"Hotword file error: {exc}", file=sys.stderr, flush=True)
+            return 2
+        for warning in config.warnings:
+            print(f"Hotword warning: {warning}", file=sys.stderr, flush=True)
+        print(f"Hotwords: {config.summary()}", flush=True)
     if args.preview_overlay:
         args.overlay_hold_seconds = 86400
         state = State()

@@ -14,12 +14,23 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, StringVar, Tk, Toplevel, filedialog, messagebox
+from tkinter import BOTH, END, LEFT, RIGHT, BooleanVar, StringVar, Text, Tk, Toplevel, filedialog, messagebox
 from tkinter import ttk
 
+from hotword_memory import load_memory, parse_hotwords, save_memory
+import hotwords
+import launcher_settings
 
-APP_VERSION = "0.3.1"
+
+APP_VERSION = "0.3.2"
 APP_TITLE = f"Live Interpreter v{APP_VERSION}"
+STRING_SETTINGS = (
+    "audio_device", "source_language", "target_language", "asr_engine", "mt_model",
+    "aliyun_workspace_id", "aliyun_region", "gummy_max_end_silence", "chunk_seconds",
+    "overlay_geometry", "overlay_font_size", "overlay_hold_seconds", "port", "overlay_mode",
+    "work_dir", "hotwords",
+)
+BOOL_SETTINGS = ("overlay_enabled", "overlay_show_source", "record_screen", "translate_enabled", "visual_enabled")
 ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr_py38"))
 ENV_PYTHON = ENV_ROOT / "python.exe"
 FFMPEG = ENV_ROOT / "Library" / "bin" / "ffmpeg.exe"
@@ -55,6 +66,14 @@ def install_root() -> Path:
     if getattr(sys, "frozen", False) and directory.name.lower() == "launcher":
         return directory.parent
     return directory
+
+
+def hotword_memory_path() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "LiveInterpreter" / "hotwords.json"
+
+
+def launcher_settings_path() -> Path:
+    return hotword_memory_path().with_name("settings.json")
 
 
 def backend_executable_path() -> Path:
@@ -104,6 +123,8 @@ def runtime_script_path() -> Path:
     copy_runtime_asset("qwen_livetranslate_worker.py")
     copy_runtime_asset("paraformer_mt_worker.py")
     copy_runtime_asset("alpha_subtitle_window.py")
+    copy_runtime_asset("hotword_memory.py")
+    copy_runtime_asset("hotwords.py")
     return script
 
 
@@ -203,6 +224,15 @@ class Launcher:
         self.process: subprocess.Popen | None = None
         self.preview_process: subprocess.Popen | None = None
         self.log_queue: queue.Queue[str] = queue.Queue()
+        self.settings_path = launcher_settings_path()
+        self._settings_timer = None
+        self._settings_dirty = False
+        self._settings_save_failed = False
+        self._key_blob = ""
+        self._key_at_load = ""
+        self._key_edited = False
+        self.hotwords_path = hotword_memory_path()
+        self.hotwords = StringVar(value=os.environ.get("LIVE_INTERPRETER_HOTWORDS", ""))
 
         self.audio_device = StringVar()
         self.source_language = StringVar(value="ja")
@@ -229,9 +259,72 @@ class Launcher:
         self.visual_enabled = BooleanVar(value=True)
 
         self._build_ui()
+        self.restore_settings()
         self.refresh_devices()
+        for name in (*STRING_SETTINGS, *BOOL_SETTINGS):
+            getattr(self, name).trace_add("write", self.schedule_settings_save)
+        self.aliyun_api_key.trace_add("write", self.api_key_changed)
         self.root.after(200, self.drain_logs)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def restore_settings(self) -> None:
+        try:
+            saved = launcher_settings.load(self.settings_path)
+        except (OSError, ValueError) as exc:
+            self.add_log(f"无法读取上次配置，已使用默认值，原文件保留：{type(exc).__name__}")
+            return
+        for name in STRING_SETTINGS:
+            if isinstance(saved.get(name), str):
+                getattr(self, name).set(saved[name])
+        for name in BOOL_SETTINGS:
+            if type(saved.get(name)) is bool:
+                getattr(self, name).set(saved[name])
+        self._key_blob = saved.get("api_key_dpapi", "") if isinstance(saved.get("api_key_dpapi", ""), str) else ""
+        if "api_key_dpapi" in saved:
+            try:
+                self.aliyun_api_key.set(launcher_settings.unprotect_api_key(self._key_blob))
+            except (OSError, ValueError):
+                self.aliyun_api_key.set("")
+                self.add_log("上次保存的 API Key 无法解密，请重新填写；其他配置已恢复。")
+        self._key_at_load = self.aliyun_api_key.get()
+        self.update_model_controls()
+
+    def api_key_changed(self, *unused) -> None:
+        self._key_edited = True
+        self.schedule_settings_save()
+
+    def schedule_settings_save(self, *unused) -> None:
+        self._settings_dirty = True
+        if self._settings_timer is not None:
+            self.root.after_cancel(self._settings_timer)
+        self._settings_timer = self.root.after(500, self.save_settings)
+
+    def save_settings(self) -> bool:
+        if self._settings_timer is not None:
+            self.root.after_cancel(self._settings_timer)
+            self._settings_timer = None
+        if not self._settings_dirty:
+            return True
+        try:
+            values = {name: getattr(self, name).get() for name in (*STRING_SETTINGS, *BOOL_SETTINGS)}
+            key = self.aliyun_api_key.get()
+            # Reuse the existing blob if the key did not change, including a blob
+            # that could not be decrypted after moving the settings to another user.
+            blob = self._key_blob if not self._key_edited and key == self._key_at_load else launcher_settings.protect_api_key(key)
+            if key and not blob:
+                blob = launcher_settings.protect_api_key(key)
+            values["api_key_dpapi"] = blob
+            launcher_settings.save(self.settings_path, values)
+        except (OSError, ValueError) as exc:
+            if not self._settings_save_failed:
+                self.add_log(f"自动保存配置失败：{type(exc).__name__}。请检查配置目录是否可写。")
+            self._settings_save_failed = True
+            return False
+        self._key_blob, self._key_at_load = blob, key
+        self._key_edited = False
+        self._settings_dirty = False
+        self._settings_save_failed = False
+        return True
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self.root, padding=14)
@@ -241,6 +334,7 @@ class Launcher:
         header.pack(fill="x")
         ttk.Label(header, text="电脑直播同声传译", font=("Microsoft YaHei UI", 18, "bold")).pack(side=LEFT)
         ttk.Button(header, text="打开字幕页", command=self.open_subtitle_page).pack(side=RIGHT)
+        ttk.Button(header, text="热词记忆", command=self.show_hotword_memory).pack(side=RIGHT, padx=(0, 8))
         ttk.Button(header, text="Edge插件目录", command=self.open_extension_folder).pack(
             side=RIGHT, padx=(0, 8)
         )
@@ -327,6 +421,14 @@ class Launcher:
         self.mt_combo.pack(side=LEFT, fill="x", expand=True)
         ttk.Button(mt_row, text="收费对比", command=self.show_model_pricing).pack(side=LEFT, padx=(8, 0))
 
+        hotword_row = ttk.Frame(cloud_box)
+        hotword_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(7, 0))
+        ttk.Label(hotword_row, text="外部热词表").pack(side=LEFT, padx=(0, 8))
+        ttk.Entry(hotword_row, textvariable=self.hotwords).pack(side=LEFT, fill="x", expand=True)
+        ttk.Button(hotword_row, text="选择", command=self.choose_hotwords).pack(side=LEFT, padx=(8, 0))
+        ttk.Button(hotword_row, text="恢复默认", command=lambda: self.hotwords.set("")).pack(side=LEFT, padx=(6, 0))
+        ttk.Label(hotword_row, text="留空：内置词表＋个人记忆").pack(side=LEFT, padx=(8, 0))
+
         small = ttk.Frame(settings)
         small.grid(row=3, column=1, sticky="ew", pady=5)
         small.columnconfigure((1, 3, 5, 7), weight=1)
@@ -396,6 +498,68 @@ class Launcher:
         self.log_text.column("line", width=720, anchor="w")
         self.log_text.pack(fill=BOTH, expand=True)
         self.update_model_controls()
+
+    def show_hotword_memory(self) -> None:
+        existing = getattr(self, "hotword_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        try:
+            memory = load_memory(self.hotwords_path) if self.hotwords_path.exists() else {"enabled": True, "terms": {}, "use_builtin": True}
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(APP_TITLE, f"无法读取热词记忆，原文件已保留：\n{exc}")
+            return
+        dialog = self.hotword_window = Toplevel(self.root)
+        dialog.title("热词记忆 · 固定译法")
+        dialog.geometry("720x520")
+        dialog.minsize(640, 480)
+        dialog.transient(self.root)
+        enabled = BooleanVar(master=dialog, value=memory["enabled"])
+        ttk.Checkbutton(dialog, text="启用热词功能", variable=enabled).pack(anchor="w", padx=14, pady=(12, 6))
+        use_builtin = BooleanVar(master=dialog, value=memory["use_builtin"])
+        ttk.Checkbutton(dialog, text="使用内置 PR 词表（默认启用，可叠加下方自定义词）", variable=use_builtin).pack(anchor="w", padx=14, pady=(0, 6))
+        ttk.Label(dialog, text="下方只编辑自行添加的词：原词 = 固定译法。例如 山田リョウ = 山田凉\n最多 200 条自定义词；同名原词以自定义译法为准。留空保存仅清空自定义词。",
+                  wraplength=660).pack(anchor="w", padx=14, pady=(0, 8))
+        editor = Text(dialog, wrap="word", height=14, undo=True)
+        editor.pack(fill=BOTH, expand=True, padx=14)
+        editor.insert("1.0", "\n".join(f"{source} = {target}" for source, target in memory["terms"].items()))
+        ttk.Label(dialog, text="安装后默认使用 PR 原词表，含人名、识别误写别名和禁写纠正。\n外部热词表优先；点击主窗口“恢复默认”可恢复内置词表＋个人记忆。\n保存后下次启动同传生效；内置词表针对日语→中文，切换语言时请检查。",
+                  wraplength=660).pack(anchor="w", padx=14, pady=8)
+        ttk.Label(dialog, text=f"已保存 {len(memory['terms'])} 条 · {self.hotwords_path}",
+                  wraplength=660).pack(anchor="w", padx=14)
+        buttons = ttk.Frame(dialog)
+        buttons.pack(fill="x", padx=14, pady=12)
+
+        def save():
+            if self.is_running():
+                messagebox.showwarning(APP_TITLE, "请先停止同传，再保存热词记忆。", parent=dialog)
+                return
+            try:
+                terms = parse_hotwords(editor.get("1.0", "end-1c"))
+                save_memory(self.hotwords_path, {"enabled": bool(enabled.get()), "terms": terms, "use_builtin": bool(use_builtin.get())})
+            except (OSError, ValueError) as exc:
+                messagebox.showerror(APP_TITLE, str(exc), parent=dialog)
+                return
+            self.add_log(f"热词记忆已保存：{len(terms)} 条，{'启用' if enabled.get() else '停用'}；下次启动同传生效。")
+            dialog.destroy()
+
+        ttk.Button(buttons, text="保存", command=save).pack(side=LEFT)
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=RIGHT)
+
+    def choose_hotwords(self) -> None:
+        chosen = filedialog.askopenfilename(title="选择外部热词表（优先于已保存记忆）",
+                                          initialdir=str(install_root() / "hotwords"),
+                                          filetypes=[("热词表", "*.txt *.json"), ("所有文件", "*.*")])
+        if chosen:
+            try:
+                config = hotwords.load(chosen)
+            except hotwords.HotwordError as exc:
+                messagebox.showerror(APP_TITLE, str(exc))
+                return
+            self.hotwords.set(chosen)
+            self.add_log(f"已选择外部热词表：{chosen}；优先于热词记忆，下次启动生效。")
+            for warning in config.warnings:
+                self.add_log(f"热词提示：{warning}")
 
     def update_model_controls(self, event=None) -> None:
         is_qwen38 = self.asr_engine.get() == "qwen3.8-live"
@@ -488,9 +652,12 @@ class Launcher:
             messagebox.showerror(APP_TITLE, str(exc))
             return
         self.device_combo["values"] = devices
-        if devices and not self.audio_device.get():
+        if devices and self.audio_device.get() not in devices:
+            previous = self.audio_device.get()
             preferred = LOOPBACK_LABEL if OVERLAY_MODES.get(self.overlay_mode.get()) == "alpha" else EDGE_TAB_LABEL
-            self.audio_device.set(preferred)
+            self.audio_device.set(preferred if preferred in devices else devices[0])
+            if previous:
+                self.add_log("上次的音频设备暂不可用，已切换到可用设备。")
         self.add_log(f"检测到 {len(devices)} 个音频设备")
 
     def choose_work_dir(self) -> None:
@@ -618,6 +785,20 @@ class Launcher:
             cmd.extend(["--translation-engine", "none"])
         if asr_engine == "paraformer-mt":
             cmd.extend(["--mt-model", self.mt_model.get() or "qwen-mt-plus"])
+        external_hotwords = self.hotwords.get().strip()
+        if external_hotwords:
+            resolved = Path(external_hotwords).expanduser().resolve()
+            hotwords.load(resolved)
+            cmd.extend(["--hotwords", str(resolved)])
+        elif asr_engine in {"paraformer-mt", "qwen3.5-live", "qwen3.8-live", "gummy"}:
+            if self.hotwords_path.exists():
+                memory = load_memory(self.hotwords_path)
+                if memory["enabled"] and (memory["terms"] or memory["use_builtin"]):
+                    cmd.extend(["--hotwords-file", str(self.hotwords_path)])
+            else:
+                default_path = hotwords.builtin_path()
+                hotwords.load(default_path)
+                cmd.extend(["--hotwords", str(default_path)])
         return cmd
 
     def audio_test_command(self) -> list[str]:
@@ -895,6 +1076,8 @@ class Launcher:
             if not messagebox.askyesno(APP_TITLE, "同传仍在运行，是否停止并退出？"):
                 return
             self.stop()
+        if not self.save_settings():
+            messagebox.showwarning(APP_TITLE, "配置未成功保存，下次启动可能需要重新填写。")
         self.close_preview()
         self.root.destroy()
 

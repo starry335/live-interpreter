@@ -104,7 +104,8 @@
       if (!item.source && !item.translated) return false;
       const updatedAge = now - Number(item.updated_at || now);
       if (!item.final) return updatedAge < Math.max(20, holdSeconds * 2);
-      const finalizedAge = now - Number(item.finalized_at || item.updated_at || now);
+      // A Qwen sentence can keep receiving text after its first final result.
+      const finalizedAge = now - Math.max(Number(item.finalized_at || 0), Number(item.updated_at || 0));
       return finalizedAge < holdSeconds;
     }).slice(-maximumLines);
     const translated = events.filter((item) => item.translated && item.translated !== "翻译中...");

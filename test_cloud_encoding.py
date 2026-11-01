@@ -2,6 +2,7 @@ import gc
 import io
 import json
 import sys
+import tempfile
 import unittest
 from tkinter import Tk, ttk
 from pathlib import Path
@@ -14,6 +15,13 @@ import paraformer_mt_worker
 
 
 class CloudEncodingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        patcher = mock.patch.object(live_interpreter_launcher, "launcher_settings_path", return_value=Path(temporary.name) / "settings.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def tearDown(self) -> None:
         # Reclaim destroyed Tk objects on the UI thread before threaded tests run.
         gc.collect()

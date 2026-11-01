@@ -1,5 +1,7 @@
 # 电脑画面和声音同声传译工具
 
+**v0.3.2**：安装后默认启用内置热词表，支持自行添加固定译法；自动记忆 API Key、Workspace ID 和字幕设置，并修复插件字幕过期问题。[下载正式版](https://github.com/starry335/live-interpreter/releases/tag/v0.3.2)。
+
 这个目录包含一个电脑同传工具，可以采集电脑音频，实时识别、翻译，并把字幕显示在透明置顶窗口中。v0.3.0 图形界面默认使用阿里云 Paraformer-Realtime-V2 + Qwen-MT-Plus，也保留 Qwen3.5 / Qwen3.8 LiveTranslate、Gummy 和 FunASR 本地识别模式。
 
 v0.3.0 新增 `qwen3.8-live`：在启动器的 ASR 下拉框中选择，填写北京或新加坡地域对应的 API Key 和 Workspace ID。该模式自动识别源语言、自动分句，原文识别始终开启，仅请求文字输出；source 和断句静音控件不适用于此模式。支持 Edge 当前标签页、画面辅助和桌面字幕，仍可切回 `qwen3.5-live` 对比测试。
@@ -133,6 +135,47 @@ Qwen3.5 LiveTranslate 和 Gummy 模式会持续发送 16 kHz 单声道 PCM，并
 ```powershell
 .\run_live_interpreter.bat --audio-device "__wasapi_loopback__" --overlay-hide-source
 ```
+
+## 自动保存配置（v0.3.2）
+
+修改界面设置后会自动保存，正常退出时立即写入；重新打开软件会恢复上次配置，启动后不会自动调用模型。
+保存范围包括 API Key、Workspace ID、地域、模型、源/目标语言、音频设备、断句静音、分段秒数、字号、停留秒数、字幕位置、端口、字幕模式、各项开关、工作目录和外部热词表路径。
+配置文件为 `%LOCALAPPDATA%\LiveInterpreter\settings.json`，与安装目录分开，覆盖安装不会覆盖该文件。
+API Key 使用当前 Windows 用户的 DPAPI 加密保存，文件中不写入明文 Key；换电脑或 Windows 用户后可能需要重新填写。
+清空 API Key 后也会保存清空状态；当上次音频设备不可用时会提示并选择可用设备。
+
+## 热词记忆（v0.3.2）
+
+主窗口点击“热词记忆”，每行填写 `原词 = 固定译法`，例如 `山田リョウ = 山田凉`。
+安装后默认启用 PR 原有词表，无需选择文件。自行添加的词会叠加到内置词表，同名原词优先采用自定义译法。
+编辑窗口只显示自行添加的词；清空自定义词不会清空内置词表。可以单独取消“使用内置 PR 词表”，或关闭全部热词功能。
+支持最多 200 条自定义词，可编辑、删除或停用；保存后下次启动同传生效。同传运行时请先停止再保存。
+词表保存在当前 Windows 用户的 `%LOCALAPPDATA%\LiveInterpreter\hotwords.json`，重启和更换工作目录后仍保留。
+只保存用户确认的词条，不会自动学习字幕，也不保存 API Key。词表按目标语言编写，切换目标语言时请检查译法。
+
+- Qwen 3.5／3.8 LiveTranslate：通过官方 `translation.corpus.phrases` 配置会话热词。
+- Paraformer：自动创建并缓存识别热词词库，通过 `vocabulary_id` 使用；创建失败会提示并降级，继续使用翻译术语。
+- Paraformer + Qwen-MT：通过官方 `translation_options.terms` 提供当前句子命中的术语，最长匹配优先，单次最多 48 条。
+- Paraformer + 普通大模型：把当前句子命中的原词和译法作为术语参考。
+- Gummy：外部词表仅用于已配置的禁写词纠正；本地模型暂不使用热词表。
+
+吸收 [PR #1](https://github.com/starry335/live-interpreter/pull/1) 的统一热词链路、示例词库和评测工具。
+主窗口的“外部热词表”支持 UTF-8 文本和 `kb-terms/v1` JSON，选择后优先使用外部词表；点击“恢复默认”恢复内置词表与个人记忆设置。
+内置词表为 PR 原有的 `hotwords/yumemita_bangdream.txt`，保留识别词、翻译别名和禁写纠正，针对日语直播翻译成中文的场景。
+
+```text
+あられ => 阿拉蕾
+ユノ
+~戦国ユーノ => 由乃
+!战国由乃 => 由乃
+```
+
+以上分别表示识别与翻译热词、仅识别词、仅翻译别名和输出禁写纠正。识别误写应标记为 `~`，避免注册进 ASR 强化错误。
+完整格式、限制及作者的离线评测见 [热词设计说明](docs/hotwords.md)；作者的评测结果未在本地重新调用付费模型验证。
+
+启用后相应热词会发送至所选翻译服务，可能增加输入 Token；不会额外增加翻译请求次数。
+热词用于引导译法，无法保证纠正所有语音识别错误或强制每次使用指定译法。
+接口依据：[实时同传热词](https://help.aliyun.com/zh/model-studio/qwen3-5-livetranslate-flash-realtime)、[Qwen-MT 术语干预](https://help.aliyun.com/zh/model-studio/machine-translation)。
 
 ## 4. 调整透明窗口
 

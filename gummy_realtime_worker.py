@@ -10,6 +10,8 @@ import time
 import uuid
 from typing import Dict, List, Optional
 
+import hotwords
+
 
 GUMMY_WEBSOCKET_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
 
@@ -26,6 +28,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--transcription-enabled", action="store_true", default=True)
     parser.add_argument("--translation-enabled", action="store_true", default=True)
     parser.add_argument("--no-translation", dest="translation_enabled", action="store_false")
+    parser.add_argument("--hotwords", "--hotwords-file", dest="hotwords", default="", help="Hotword glossary file (.txt or JSON).")
     return parser.parse_args(argv)
 
 
@@ -53,6 +56,7 @@ class GummyConnection:
         self.ws = None
         self.receiver: Optional[threading.Thread] = None
         self.error = ""
+        self.hotword_config = getattr(args, "hotword_config", None)
 
     def open(self) -> None:
         self.ws = self.websocket.create_connection(
@@ -169,11 +173,14 @@ class GummyConnection:
                 continue
             if translation.get("lang") != self.args.target_language:
                 continue
+            text = str(translation.get("text") or "")
+            if self.hotword_config:
+                text = self.hotword_config.postprocess(text)
             emit(
                 {
                     "event": "result",
                     "sentence_id": translation.get("sentence_id"),
-                    "translation": translation.get("text") or "",
+                    "translation": text,
                     "translation_final": bool(translation.get("sentence_end")),
                     "begin_time": translation.get("begin_time"),
                     "end_time": translation.get("end_time"),
@@ -214,6 +221,19 @@ class GummyConnection:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    args.hotword_config = None
+    if str(getattr(args, "hotwords", "")).strip():
+        try:
+            args.hotword_config = hotwords.load(args.hotwords)
+        except hotwords.HotwordError as exc:
+            emit({"event": "fatal_error", "message": str(exc)})
+            return 2
+        for warning in args.hotword_config.warnings:
+            emit({"event": "warning", "message": warning})
+        emit({
+            "event": "warning",
+            "message": "Gummy has no hotword API; the glossary is only used for output rewrites.",
+        })
     api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
         emit({"event": "error", "message": "Missing DASHSCOPE_API_KEY."})

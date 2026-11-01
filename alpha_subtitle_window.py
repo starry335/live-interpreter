@@ -195,18 +195,18 @@ class AlphaSurface:
 
 def run_alpha_subtitle_window(args, state, stop_event):
     import tkinter as tk
-    from live_interpreter import compose_live_subtitles, load_overlay_geometry, save_overlay_geometry
+    from live_interpreter import compose_live_subtitles, load_overlay_geometry, save_overlay_geometry, run_subtitle_mainloop
 
     path = args.work_dir / "alpha_window.json"
     width, height, x, y = load_overlay_geometry(path, args.overlay_geometry)
     root = tk.Tk()
     root.title("Live Interpreter Subtitles")
     root.overrideredirect(True)
+    root.attributes("-topmost", True)
     root.geometry(f"{width}x{height}{x:+d}{y:+d}")
     root.minsize(480, 180)
     hwnd = make_capturable(root)
     surface, rendered = None, None
-    failure = []
     drag = {}
 
     def close():
@@ -219,26 +219,22 @@ def run_alpha_subtitle_window(args, state, stop_event):
         if stop_event.is_set():
             close()
             return
-        try:
-            snapshot = state.snapshot()
-            text, source = compose_live_subtitles(snapshot["events"], args.overlay_live_events,
-                args.overlay_live_max_events, args.overlay_hold_seconds, args.overlay_live_max_chars,
-                now=float(snapshot["monotonic_now"]))
-            source = source if args.overlay_show_source else ""
-            size = (max(1, root.winfo_width()), max(1, root.winfo_height()))
-            key = (text, source, size)
-            if key != rendered:
-                if surface is None or size != (surface.width, surface.height):
-                    if surface:
-                        surface.close()
-                    surface = AlphaSurface(*size, args.overlay_font, max(15, args.overlay_font_size))
-                surface.draw(text, source)
-                surface.present(hwnd, root.winfo_x(), root.winfo_y())
-                rendered = key
-            root.after(100, refresh)
-        except Exception as exc:
-            failure.append(exc)
-            close()
+        snapshot = state.snapshot()
+        text, source = compose_live_subtitles(snapshot["events"], args.overlay_live_events,
+            args.overlay_live_max_events, args.overlay_hold_seconds, args.overlay_live_max_chars,
+            now=float(snapshot["monotonic_now"]))
+        source = source if args.overlay_show_source else ""
+        size = (max(1, root.winfo_width()), max(1, root.winfo_height()))
+        key = (text, source, size)
+        if key != rendered:
+            if surface is None or size != (surface.width, surface.height):
+                if surface:
+                    surface.close()
+                surface = AlphaSurface(*size, args.overlay_font, max(15, args.overlay_font_size))
+            surface.draw(text, source)
+            surface.present(hwnd, root.winfo_x(), root.winfo_y())
+            rendered = key
+        root.after(100, refresh)
 
     root.bind("<ButtonPress-1>", lambda event: drag.update(x=event.x_root - root.winfo_x(), y=event.y_root - root.winfo_y()))
     root.bind("<B1-Motion>", lambda event: root.geometry(f"{event.x_root-drag['x']:+d}{event.y_root-drag['y']:+d}") if drag else None)
@@ -251,9 +247,7 @@ def run_alpha_subtitle_window(args, state, stop_event):
     root.protocol("WM_DELETE_WINDOW", close)
     root.after(0, refresh)
     try:
-        root.mainloop()
+        run_subtitle_mainloop(root, args.work_dir, stop_event)
     finally:
         if surface:
             surface.close()
-    if failure:
-        raise failure[0]

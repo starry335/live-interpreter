@@ -11,6 +11,13 @@ import live_interpreter_launcher as launcher_module
 
 
 class CaptureWindowTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        patcher = mock.patch.object(launcher_module, "launcher_settings_path", return_value=launcher_module.Path(temporary.name) / "settings.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def tearDown(self):
         gc.collect()
 

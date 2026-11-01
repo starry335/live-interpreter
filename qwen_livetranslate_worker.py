@@ -11,6 +11,8 @@ import time
 import uuid
 from typing import Dict, List, Optional
 
+import hotwords
+
 
 MODEL = "qwen3.5-livetranslate-flash-realtime"
 MODEL_38 = "qwen3.8-livetranslate-flash-realtime"
@@ -33,6 +35,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--workspace-id", default=os.environ.get("DASHSCOPE_WORKSPACE_ID", ""))
     parser.add_argument("--region", choices=sorted(REGION_HOSTS), default="beijing")
     parser.add_argument("--visual-file", default="")
+    parser.add_argument("--hotwords", "--hotwords-file", dest="hotwords", default="", help="Hotword glossary file (.txt or JSON).")
     return parser.parse_args(argv)
 
 
@@ -51,11 +54,25 @@ def image_event(data: bytes) -> Dict[str, object]:
     }
 
 
+def translation_config(args: argparse.Namespace) -> Dict[str, object]:
+    translation: Dict[str, object] = {"language": args.target_language}
+    config = getattr(args, "hotword_config", None)
+    if config is None and args.hotwords:
+        config = hotwords.load(args.hotwords)
+    phrases = config.translation_phrases() if config else {}
+    if phrases:
+        # LiveTranslate applies this to the translation stage only; the ASR
+        # transcript is not affected.
+        translation["corpus"] = {"phrases": phrases}
+    return translation
+
+
 def session_config(args: argparse.Namespace) -> Dict[str, object]:
+    translation = translation_config(args)
     if args.model == MODEL_38:
         return {
             "output_modalities": ["text"],
-            "translation": {"language": args.target_language},
+            "translation": translation,
             "audio": {"input": {"turn_detection": {"type": "speaker_detection", "threshold": 0.5}}},
         }
     transcription: Dict[str, object] = {"model": "qwen3-asr-flash-realtime"}
@@ -66,7 +83,7 @@ def session_config(args: argparse.Namespace) -> Dict[str, object]:
         "sample_rate": 16000,
         "input_audio_format": "pcm",
         "input_audio_transcription": transcription,
-        "translation": {"language": args.target_language},
+        "translation": translation,
         "turn_detection": {
             "type": "server_vad",
             "threshold": 0.2,
@@ -186,10 +203,12 @@ class QwenLiveConnection:
         self.visual_sender: Optional[threading.Thread] = None
         self.error = ""
         self.normalizer = ResultNormalizer()
+        self.hotword_config = getattr(args, "hotword_config", None)
         self.send_lock = threading.Lock()
         self.audio_started = threading.Event()
 
     def open(self) -> None:
+        config = session_config(self.args)
         workspace_id = self.args.workspace_id.strip()
         if not workspace_id:
             raise RuntimeError("Missing Alibaba Cloud Workspace ID.")
@@ -212,7 +231,7 @@ class QwenLiveConnection:
             {
                 "event_id": uuid.uuid4().hex,
                 "type": "session.update",
-                "session": session_config(self.args),
+                "session": config,
             }
         )
         if not self.updated.wait(timeout=20) or self.failed.is_set():
@@ -288,6 +307,10 @@ class QwenLiveConnection:
                 return
             else:
                 for payload in self.normalizer.handle(message):
+                    if payload.get("translation") and self.hotword_config:
+                        payload["translation"] = self.hotword_config.postprocess(
+                            str(payload["translation"])
+                        )
                     emit(payload)
 
     def _fail(self, message: str, code: str = "") -> None:
@@ -327,6 +350,15 @@ class QwenLiveConnection:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    args.hotword_config = None
+    if str(getattr(args, "hotwords", "")).strip():
+        try:
+            args.hotword_config = hotwords.load(args.hotwords)
+        except hotwords.HotwordError as exc:
+            emit({"event": "fatal_error", "message": str(exc)})
+            return 2
+        for warning in args.hotword_config.warnings:
+            emit({"event": "warning", "message": warning})
     api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
         emit({"event": "error", "message": "Missing DASHSCOPE_API_KEY."})

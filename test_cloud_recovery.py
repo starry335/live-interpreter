@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,41 @@ from live_interpreter import (
 
 
 class CloudRecoveryTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the extension's subtitle filter")
+    def test_updated_final_translation_is_not_hidden_as_expired(self):
+        snapshots = []
+        for engine in ("Qwen3.5 LiveTranslate", "Qwen3.8 LiveTranslate"):
+            state = State()
+            state.set_status("waiting for Edge tab audio")
+            for timestamp, text, final in ((100, "第一句", True), (130, "新的正确译文", False),
+                                           (160, "新的正确译文", True)):
+                message = {"event": "result", "sentence_id": "1", "translation": text,
+                           "translation_final": final}
+                process = mock.Mock(stdout=io.BytesIO((json.dumps(message) + "\n").encode()))
+                with mock.patch("live_interpreter.time.monotonic", return_value=timestamp):
+                    handle_cloud_output(process, state, threading.Event(), {}, True, engine, "test")
+                    snapshot = state.snapshot()
+                if timestamp > 100:
+                    snapshots.append(snapshot)
+            self.assertEqual(snapshot["status"], f"listening ({engine})")
+            self.assertEqual(snapshot["events"][0]["finalized_at"], 160)
+
+        # Run the actual content.js filter, including its expiry checks.
+        script = r'''
+const fs = require('node:fs');
+const source = fs.readFileSync('edge_extension/content.js', 'utf8');
+const body = source.slice(source.indexOf('    const now = Number(snapshot.monotonic_now);'),
+                          source.indexOf('    const translated = events.filter'));
+const select = new Function('snapshot', 'fontSize', 'holdSeconds', body + '\nreturn events;');
+const snapshots = JSON.parse(fs.readFileSync(0, 'utf8'));
+process.stdout.write(JSON.stringify(snapshots.map(snapshot => select(snapshot, 16, 8))));
+'''
+        result = subprocess.run([shutil.which("node"), "-e", script],
+                                cwd=Path(__file__).parent, input=json.dumps(snapshots),
+                                text=True, encoding="utf-8", capture_output=True, check=True)
+        for events in json.loads(result.stdout):
+            self.assertEqual([item["translated"] for item in events], ["新的正确译文"])
+
     def test_qwen38_routes_to_qwen_worker_with_model_and_visual_input(self):
         with tempfile.TemporaryDirectory() as directory:
             args = parse_args(["--asr-engine", "qwen3.8-live", "--audio-device", "__edge_tab_audio__",
