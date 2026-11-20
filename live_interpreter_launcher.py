@@ -30,7 +30,8 @@ STRING_SETTINGS = (
     "overlay_geometry", "overlay_font_size", "overlay_hold_seconds", "port", "overlay_mode",
     "work_dir", "hotwords",
 )
-BOOL_SETTINGS = ("overlay_enabled", "overlay_show_source", "record_screen", "translate_enabled", "visual_enabled")
+BOOL_SETTINGS = ("overlay_enabled", "overlay_show_source", "record_screen", "translate_enabled",
+                 "visual_enabled", "icl_enabled")
 ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr_py38"))
 ENV_PYTHON = ENV_ROOT / "python.exe"
 FFMPEG = ENV_ROOT / "Library" / "bin" / "ffmpeg.exe"
@@ -252,6 +253,7 @@ class Launcher:
         self.target_language = StringVar(value="Chinese")
         self.asr_engine = StringVar(value=os.environ.get("LIVE_INTERPRETER_ASR_ENGINE", "paraformer-mt"))
         self.mt_model = StringVar(value=os.environ.get("LIVE_INTERPRETER_MT_MODEL", "qwen-mt-plus"))
+        self.icl_enabled = BooleanVar(value=True)
         self.aliyun_api_key = StringVar(value=os.environ.get("DASHSCOPE_API_KEY", ""))
         self.aliyun_workspace_id = StringVar(
             value=os.environ.get("DASHSCOPE_WORKSPACE_ID", "")
@@ -288,7 +290,10 @@ class Launcher:
             return
         for name in STRING_SETTINGS:
             if isinstance(saved.get(name), str):
-                getattr(self, name).set(saved[name])
+                value = saved[name]
+                if name == "asr_engine" and value == "qwen-audio-stream":
+                    value = "qwen3.1-audio"
+                getattr(self, name).set(value)
         for name in BOOL_SETTINGS:
             if type(saved.get(name)) is bool:
                 getattr(self, name).set(saved[name])
@@ -386,9 +391,9 @@ class Launcher:
             asr_box,
             textvariable=self.asr_engine,
             values=(
-                ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen-audio-stream")
+                ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen3.1-audio")
                 if getattr(sys, "frozen", False)
-                else ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen-audio-stream",
+                else ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen3.1-audio",
                       "sensevoice", "streaming")
             ),
             state="readonly",
@@ -434,6 +439,10 @@ class Launcher:
         )
         self.mt_combo.pack(side=LEFT, fill="x", expand=True)
         ttk.Button(mt_row, text="收费对比", command=self.show_model_pricing).pack(side=LEFT, padx=(8, 0))
+        self.icl_check = ttk.Checkbutton(
+            mt_row, text="热词小抄 (ICL)", variable=self.icl_enabled, command=self.schedule_settings_save,
+        )
+        self.icl_check.pack(side=LEFT, padx=(8, 0))
 
         hotword_row = ttk.Frame(cloud_box)
         hotword_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(7, 0))
@@ -582,7 +591,11 @@ class Launcher:
             self.aliyun_region.set("beijing")
             self.visual_enabled.set(False)
         self.visual_button.configure(state="disabled" if is_paraformer_mt else "normal")
-        self.mt_combo.configure(state="readonly" if is_paraformer_mt else "disabled")
+        is_text_mt = self.asr_engine.get() in {"paraformer-mt", "qwen3.1-audio"}
+        self.mt_combo.configure(state="readonly" if is_text_mt else "disabled")
+        if hasattr(self, "icl_check"):
+            supports_icl = is_text_mt and not self.mt_model.get().startswith("qwen-mt-")
+            self.icl_check.configure(state="normal" if supports_icl else "disabled")
         if is_qwen38:
             self.source_language.set("auto")
         self.source_combo.configure(state="disabled" if is_qwen38 else "readonly")
@@ -810,10 +823,11 @@ class Launcher:
         cmd.append("--visual-input" if self.visual_enabled.get() and asr_engine != "paraformer-mt" else "--no-visual-input")
         if not self.translate_enabled.get():
             cmd.extend(["--translation-engine", "none"])
-        if asr_engine in {"paraformer-mt", "qwen-audio-stream"}:
-            cmd.extend(["--mt-model", self.mt_model.get() or "qwen3.8-max", "--mt-mode", "icl"])
+        if asr_engine in {"paraformer-mt", "qwen3.1-audio"}:
+            mode = "icl" if self.icl_enabled.get() else "force"
+            cmd.extend(["--mt-model", self.mt_model.get() or "qwen3.8-max", "--mt-mode", mode])
             cards = hotwords.builtin_cards_path()
-            if cards.exists():
+            if mode == "icl" and cards.exists():
                 cmd.extend(["--hotword-cards", str(cards)])
         external_hotwords = self.hotwords.get().strip()
         if external_hotwords:
