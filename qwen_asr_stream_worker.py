@@ -94,6 +94,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Kana-only terms at least this long skip the honorific requirement.")
     parser.add_argument("--context-turns", type=int, default=0,
                         help="Previous subtitles sent as context; 0 disables it (default).")
+    parser.add_argument("--vad-model", default="", choices=["", "near_meeting_16k", "far_field_meeting_16k"],
+                        help="3.1 only; empty keeps the server default.")
+    parser.add_argument("--speech-noise-threshold", type=float, default=None,
+                        help="3.1 only; -1..1, omitted keeps the server default.")
     parser.add_argument("--hotword-cards", default="",
                         help="Optional JSON {source: attribute} for ICL name cards.")
     parser.add_argument("--context-text", default="",
@@ -169,6 +173,10 @@ class QwenASRStreamConnection(GummyConnection):
             "multi_threshold_mode_enabled": True,
             "heartbeat": True,
         }
+        if self.args.vad_model:
+            parameters["vad_model"] = self.args.vad_model
+        if self.args.speech_noise_threshold is not None:
+            parameters["speech_noise_threshold"] = self.args.speech_noise_threshold
         if self.args.source_language != "auto":
             # qwen-audio-3.0 speaks language_hints; a plain string is also accepted.
             parameters["language_hints"] = [self.args.source_language]

@@ -2331,6 +2331,9 @@ def cloud_stream_loop(
     elif is_qwen_asr:
         command.extend([
             "--model", QWEN_ASR_MODEL,
+            # Loopback / single-streamer audio is near-field and clean; the
+            # far-field default keeps whole monologues in one segment.
+            "--vad-model", "near_meeting_16k",
             "--workspace-id", args.aliyun_workspace_id, "--region", args.aliyun_region,
             "--log-file", str(args.work_dir / "qwen_asr.jsonl"),
             "--mt-model", args.mt_model,
