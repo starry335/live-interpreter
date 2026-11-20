@@ -143,6 +143,15 @@ class QwenASRStreamConnection(GummyConnection):
             LOGGER.warning(warning)
             emit({"event": "warning", "message": warning})
         emit({
+            "event": "session_config",
+            "model": args.model,
+            "source_language": args.source_language,
+            "language_hints": [] if args.source_language == "auto" else [args.source_language],
+            "hotwords": str(getattr(args, "hotwords", "")),
+            "cards": cards_path,
+            "mt_mode": args.mt_mode,
+        })
+        emit({
             "event": "hotword_vocabulary",
             "asr_terms": len(self.hotword_config.asr_terms()) if self.hotword_config else 0,
             "mt_terms": len(self.hotword_config.mt_terms()) if self.hotword_config else 0,

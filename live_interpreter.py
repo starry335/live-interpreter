@@ -2200,6 +2200,10 @@ def handle_cloud_output(
             if text:
                 state.set_status(f"listening ({engine_name})")
                 print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
+        elif event == "session_config":
+            hints = message.get("language_hints") or []
+            print(f"{engine_name} session: model={message.get('model')} "
+                  f"source={message.get('source_language')} hints={hints} mt={message.get('mt_mode')}", flush=True)
         elif event == "hotword_vocabulary":
             asr_list = message.get("asr_term_list") or []
             print(f"{engine_name} hotwords: {message.get('asr_terms')} ASR terms, "
