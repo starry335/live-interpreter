@@ -90,11 +90,19 @@ def launcher_settings_path() -> Path:
     return hotword_memory_path().with_name("settings.json")
 
 
-def backend_executable_path() -> Path:
-    candidates = [
-        install_root() / "backend" / "LiveInterpreterBackend.exe",
+def backend_executable_candidates() -> list[Path]:
+    root = install_root()
+    return [
+        root / "backend" / "LiveInterpreterBackend.exe",
         app_dir() / "LiveInterpreterBackend.exe",
+        # raw PyInstaller dist layout: dist/LiveInterpreter + dist/LiveInterpreterBackend
+        app_dir().parent / "LiveInterpreterBackend" / "LiveInterpreterBackend.exe",
+        root.parent / "LiveInterpreterBackend" / "LiveInterpreterBackend.exe",
     ]
+
+
+def backend_executable_path() -> Path:
+    candidates = backend_executable_candidates()
     return next((path for path in candidates if path.exists()), candidates[0])
 
 
@@ -723,7 +731,8 @@ class Launcher:
         if getattr(sys, "frozen", False):
             backend = backend_executable_path()
             if not backend.exists():
-                raise RuntimeError(f"后台程序不存在，请重新安装：{backend}")
+                searched = "\n".join(f"  - {path}" for path in backend_executable_candidates())
+                raise RuntimeError(f"后台程序不存在，请重新安装。已查找：\n{searched}")
             command_prefix = [str(backend)]
         else:
             script = runtime_script_path()
