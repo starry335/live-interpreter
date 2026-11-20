@@ -103,7 +103,7 @@ class CloudEncodingTests(unittest.TestCase):
                 self.assertEqual(len(table.get_children()), len(live_interpreter_launcher.MT_PRICES))
                 self.assertEqual({row[0] for row in live_interpreter_launcher.MT_PRICES}, set(paraformer_mt_worker.MT_MODELS))
                 self.assertEqual(table.selection(), ("2",))
-                self.assertEqual(tuple(table.item("2", "values")[1:]), ("1.80", "5.40", "0.113", "0.977"))
+                self.assertEqual(tuple(table.item("2", "values")[1:]), ("1.80", "5.40", "0.113", "0.977", "0.386"))
                 table.selection_set("6")
                 with mock.patch.object(launcher, "is_running", return_value=True):
                     apply_button.invoke()

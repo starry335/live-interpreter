@@ -599,8 +599,8 @@ class Launcher:
             return previous
         dialog = self.pricing_window = Toplevel(self.root)
         dialog.title("翻译模型收费对比 · 阿里云百炼北京")
-        dialog.geometry("960x460")
-        dialog.minsize(900, 460)
+        dialog.geometry("1120x520")
+        dialog.minsize(1040, 520)
         dialog.transient(self.root)
         ttk.Label(
             dialog, text="北京地域标准价 · 更新于 2026-10-25 · 适用于 Paraformer + 文本翻译模式",
@@ -609,13 +609,14 @@ class Launcher:
             dialog, text="输入/输出单价：元/百万 Token；小时费用：元/小时。选择一行，点击“使用选中模型”。",
         ).pack(anchor="w", padx=14, pady=(0, 8))
         table = ttk.Treeview(
-            dialog, columns=("model", "input", "output", "translation", "total"),
+            dialog, columns=("model", "input", "output", "translation", "total", "total31"),
             show="headings", selectmode="browse", height=len(MT_PRICES),
         )
         for column, title, width in (
             ("model", "翻译模型", 300), ("input", "输入单价", 100),
-            ("output", "输出单价", 100), ("translation", "翻译费估算/小时", 150),
-            ("total", "识别+翻译估算/小时", 170),
+            ("output", "输出单价", 100), ("translation", "翻译费估算/小时", 140),
+            ("total", "识别 Paraformer + 翻译/小时", 180),
+            ("total31", "识别 3.1 + 翻译/小时", 170),
         ):
             table.heading(column, text=title)
             table.column(column, width=width, minwidth=width, anchor="w" if column == "model" else "center")
@@ -624,6 +625,7 @@ class Launcher:
             table.insert("", END, iid=str(index), values=(
                 label, f"{input_price:.2f}", f"{output_price:.2f}",
                 f"{translation_hour:.3f}", f"{translation_hour + 0.864:.3f}",
+                f"{translation_hour + 0.273:.3f}",
             ))
         current = next((str(i) for i, row in enumerate(MT_PRICES) if row[0] == self.mt_model.get()), "2")
         table.selection_set(current)
