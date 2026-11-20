@@ -838,19 +838,24 @@ class Launcher:
         external_hotwords = self.hotwords.get().strip()
         if external_hotwords:
             resolved = Path(external_hotwords).expanduser().resolve()
-            hotwords.load(resolved)
+            custom = hotwords.load(resolved)
             cmd.extend(["--hotwords", str(resolved)])
+            self.add_log(f"热词表：外部 {resolved}（{len(custom.pairs)} 条译名 / "
+                         f"{len(custom.asr_terms())} 条识别词）")
         elif asr_engine in {"paraformer-mt", "qwen3.1-audio", "qwen3.5-live", "qwen3.8-live", "gummy"}:
             if self.hotwords_path.exists():
                 memory = load_memory(self.hotwords_path)
                 if memory["enabled"] and (memory["terms"] or memory["use_builtin"]):
                     cmd.extend(["--hotwords-file", str(self.hotwords_path)])
+                    merged = hotwords.load(self.hotwords_path)
+                    self.add_log(f"热词表：界面记忆 {self.hotwords_path}（{len(merged.pairs)} 条译名 / "
+                                 f"{len(merged.asr_terms())} 条识别词）")
             else:
                 default_path = hotwords.builtin_path()
                 builtin = hotwords.load(default_path)
                 cmd.extend(["--hotwords", str(default_path)])
                 self.add_log(
-                    f"热词表：内置 {default_path.name}（{len(builtin.pairs)} 条译名 / "
+                    f"热词表：内置 {default_path}（{len(builtin.pairs)} 条译名 / "
                     f"{len(builtin.asr_terms())} 条识别词）"
                 )
         return cmd
