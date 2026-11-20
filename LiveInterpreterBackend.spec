@@ -14,8 +14,11 @@ a = Analysis(
     ['live_interpreter_backend.py'],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=collect_data_files('certifi') + [(str(ROOT / 'hotwords' / 'yumemita_bangdream.txt'), 'hotwords')],
-    hiddenimports=['certifi', 'websocket', 'tkinter', 'tkinter.font', 'hotwords'],
+    datas=collect_data_files('certifi') + [
+        (str(ROOT / 'hotwords' / 'yumemita_bangdream.txt'), 'hotwords'),
+        (str(ROOT / 'hotwords' / 'name_cards.json'), 'hotwords'),
+    ],
+    hiddenimports=['certifi', 'websocket', 'tkinter', 'tkinter.font', 'hotwords', 'qwen_asr_stream_worker'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

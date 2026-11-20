@@ -44,14 +44,27 @@ EDGE_TAB_DEVICE = "__edge_tab_audio__"
 OVERLAY_MODES = {"桌面透明悬浮窗": "desktop", "直播透明窗口（免抠像）": "alpha"}
 MODEL_PRICING_URL = "https://help.aliyun.com/zh/model-studio/model-pricing"
 # Beijing standard prices (CNY / million text tokens), checked 2026-10-25.
+# (model, label, input_price, output_price, input_tokens, output_tokens)
+# Token counts follow the 887 s reference sample with context turned off:
+# 9,390 input / 2,008 output; the ICL rows use the measured +44% prompt growth.
 MT_PRICES = (
-    ("qwen-mt-lite", "qwen-mt-lite", 0.60, 1.60),
-    ("qwen-mt-flash", "qwen-mt-flash", 0.70, 1.95),
-    ("qwen-mt-plus", "qwen-mt-plus", 1.80, 5.40),
-    ("qwen3.8-flash", "qwen3.8-flash", 0.80, 2.70),
-    ("qwen3.8-max", "qwen3.8-max", 12.00, 36.00),
-    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（忙时）", 2.00, 8.00),
-    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（闲时）", 1.00, 4.00),
+    ("qwen-mt-lite", "qwen-mt-lite", 0.60, 1.60, 9390, 2008),
+    ("qwen-mt-flash", "qwen-mt-flash", 0.70, 1.95, 9390, 2008),
+    ("qwen-mt-plus", "qwen-mt-plus", 1.80, 5.40, 9390, 2008),
+    ("qwen3.8-flash", "qwen3.8-flash", 0.80, 2.70, 9390, 2008),
+    ("qwen3.8-max", "qwen3.8-max", 12.00, 36.00, 9390, 2008),
+    ("qwen3.8-max", "qwen3.8-max + ICL", 12.00, 36.00, 13527, 2008),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（忙时）", 2.00, 8.00, 9390, 2008),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（忙时）+ ICL", 2.00, 8.00, 13527, 2008),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（闲时）", 1.00, 4.00, 9390, 2008),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（闲时）+ ICL", 1.00, 4.00, 13527, 2008),
+)
+
+# (engine, label, cny_per_hour, note)
+ASR_PRICES = (
+    ("paraformer-realtime-v2", "Paraformer-Realtime-V2", 0.864, "0.00024 元/秒"),
+    ("qwen-audio-3.0-asr-flash-streaming", "qwen-audio-3.0（流式）", 1.188, "0.00033 元/秒"),
+    ("qwen-audio-3.1-asr-flash-streaming", "qwen-audio-3.1（流式）", 0.273, "6/4.5 元每百万 token，实测 9,680 入 + 2,023 出 /887 秒"),
 )
 
 
@@ -373,9 +386,10 @@ class Launcher:
             asr_box,
             textvariable=self.asr_engine,
             values=(
-                ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt")
+                ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen-audio-stream")
                 if getattr(sys, "frozen", False)
-                else ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "sensevoice", "streaming")
+                else ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen-audio-stream",
+                      "sensevoice", "streaming")
             ),
             state="readonly",
             width=15,
@@ -605,8 +619,8 @@ class Launcher:
         ):
             table.heading(column, text=title)
             table.column(column, width=width, minwidth=width, anchor="w" if column == "model" else "center")
-        for index, (model, label, input_price, output_price) in enumerate(MT_PRICES):
-            translation_hour = (12032 * input_price + 2008 * output_price) / 1_000_000 * 3600 / 887
+        for index, (model, label, input_price, output_price, input_tokens, output_tokens) in enumerate(MT_PRICES):
+            translation_hour = (input_tokens * input_price + output_tokens * output_price) / 1_000_000 * 3600 / 887
             table.insert("", END, iid=str(index), values=(
                 label, f"{input_price:.2f}", f"{output_price:.2f}",
                 f"{translation_hour:.3f}", f"{translation_hour + 0.864:.3f}",
@@ -615,8 +629,19 @@ class Launcher:
         table.selection_set(current)
         table.focus(current)
         table.pack(fill=BOTH, expand=True, padx=14)
+        asr_frame = ttk.Frame(dialog)
+        asr_frame.pack(fill="x", padx=14, pady=(10, 0))
+        ttk.Label(asr_frame, text="识别引擎（含 qwen-audio-3.1）").pack(anchor="w")
+        asr_table = ttk.Treeview(asr_frame, columns=("engine", "price", "note"), show="headings",
+                                 selectmode="browse", height=len(ASR_PRICES))
+        for column, title, width in (("engine", "识别引擎", 300), ("price", "估算/小时", 120), ("note", "计费", 380)):
+            asr_table.heading(column, text=title)
+            asr_table.column(column, width=width, anchor="w" if column != "price" else "center")
+        for index, (engine, label, price, note) in enumerate(ASR_PRICES):
+            asr_table.insert("", END, iid=f"asr{index}", values=(label, f"{price:.3f}", note))
+        asr_table.pack(fill="x")
         for note in (
-            "统一样本：887 秒音频、12,032 输入 Token、2,008 输出 Token；识别费按 0.00024 元/秒（0.864 元/小时）计。",
+            "统一样本：887 秒音频、9,390 输入 Token、2,008 输出 Token（上下文关闭）；ICL 行按实测 +44% 输入。",
             "小时费用仅供同 Token 比较；通用模型含上下文，实际用量可能更高。未计免费额度、缓存优惠，以阿里云账单为准。",
             "DeepSeek 忙时 08:00–22:00，闲时 22:00–次日 08:00（北京时间）；两行是同一模型，价格自动按时段生效。",
         ):
@@ -689,7 +714,7 @@ class Launcher:
         source_language = self.source_language.get() or "auto"
         asr_engine = self.asr_engine.get() or "qwen3.5-live"
         edge_tab_audio = self.audio_device.get() == EDGE_TAB_LABEL
-        cloud_engines = {"qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt"}
+        cloud_engines = {"qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen-audio-stream"}
         if edge_tab_audio and asr_engine not in cloud_engines:
             asr_engine = "qwen3.5-live"
             self.asr_engine.set(asr_engine)
@@ -783,8 +808,11 @@ class Launcher:
         cmd.append("--visual-input" if self.visual_enabled.get() and asr_engine != "paraformer-mt" else "--no-visual-input")
         if not self.translate_enabled.get():
             cmd.extend(["--translation-engine", "none"])
-        if asr_engine == "paraformer-mt":
-            cmd.extend(["--mt-model", self.mt_model.get() or "qwen-mt-plus"])
+        if asr_engine in {"paraformer-mt", "qwen-audio-stream"}:
+            cmd.extend(["--mt-model", self.mt_model.get() or "qwen3.8-max", "--mt-mode", "icl"])
+            cards = hotwords.builtin_cards_path()
+            if cards.exists():
+                cmd.extend(["--hotword-cards", str(cards)])
         external_hotwords = self.hotwords.get().strip()
         if external_hotwords:
             resolved = Path(external_hotwords).expanduser().resolve()

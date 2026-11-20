@@ -7,6 +7,7 @@ import gummy_realtime_worker
 import live_interpreter
 import qwen_livetranslate_worker
 import paraformer_mt_worker
+import qwen_asr_stream_worker
 
 
 def configure_utf8() -> None:
@@ -22,6 +23,8 @@ def configure_utf8() -> None:
 def main() -> int:
     configure_utf8()
     args = sys.argv[1:]
+    if args[:1] == ["--qwen-asr-worker"]:
+        return qwen_asr_stream_worker.main(args[1:])
     if args[:1] == ["--paraformer-mt-worker"]:
         return paraformer_mt_worker.main(args[1:])
     if args[:1] == ["--qwen-worker"]:

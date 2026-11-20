@@ -31,6 +31,8 @@ ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr
 GUMMY_WORKER = ROOT / "gummy_realtime_worker.py"
 QWEN_LIVE_WORKER = ROOT / "qwen_livetranslate_worker.py"
 PARAFORMER_MT_WORKER = ROOT / "paraformer_mt_worker.py"
+QWEN_ASR_WORKER = ROOT / "qwen_asr_stream_worker.py"
+QWEN_ASR_MODEL = "qwen-audio-3.1-asr-flash-streaming"
 QWEN_LIVE_MODELS = {
     "qwen3.5-live": "qwen3.5-livetranslate-flash-realtime",
     "qwen3.8-live": "qwen3.8-livetranslate-flash-realtime",
@@ -2239,11 +2241,17 @@ def cloud_stream_loop(
 ) -> None:
     is_qwen_live = args.asr_engine in QWEN_LIVE_MODELS
     is_paraformer_mt = args.asr_engine == "paraformer-mt"
+    is_qwen_asr = args.asr_engine == "qwen-audio-stream"
     engine_name = (
         f"Paraformer + {args.mt_model}" if is_paraformer_mt else
+        f"Qwen ASR 3.1 + {args.mt_model}" if is_qwen_asr else
         args.asr_engine.replace("qwen", "Qwen").replace("-live", " LiveTranslate") if is_qwen_live else "Gummy"
     )
-    worker_path = PARAFORMER_MT_WORKER if is_paraformer_mt else QWEN_LIVE_WORKER if is_qwen_live else GUMMY_WORKER
+    worker_path = (
+        PARAFORMER_MT_WORKER if is_paraformer_mt else
+        QWEN_ASR_WORKER if is_qwen_asr else
+        QWEN_LIVE_WORKER if is_qwen_live else GUMMY_WORKER
+    )
     if not os.environ.get("DASHSCOPE_API_KEY", "").strip():
         state.set_status("missing Alibaba Cloud API key")
         print("Missing DASHSCOPE_API_KEY. Enter the API key in the launcher.", file=sys.stderr, flush=True)
@@ -2267,7 +2275,9 @@ def cloud_stream_loop(
 
     command = [
         sys.executable,
-        "--paraformer-mt-worker" if is_paraformer_mt else "--qwen-worker" if is_qwen_live else "--gummy-worker",
+        "--paraformer-mt-worker" if is_paraformer_mt else
+        "--qwen-asr-worker" if is_qwen_asr else
+        "--qwen-worker" if is_qwen_live else "--gummy-worker",
     ] if getattr(sys, "frozen", False) else [
         sys.executable,
         str(worker_path),
@@ -2300,7 +2310,22 @@ def cloud_stream_loop(
             "--workspace-id", args.aliyun_workspace_id, "--region", args.aliyun_region,
             "--log-file", str(args.work_dir / "paraformer_mt.jsonl"),
             "--mt-model", args.mt_model,
+            "--mt-mode", args.mt_mode,
+            "--context-turns", str(args.context_turns),
         ])
+        if args.hotword_cards:
+            command.extend(["--hotword-cards", str(Path(args.hotword_cards).expanduser().resolve())])
+    elif is_qwen_asr:
+        command.extend([
+            "--model", QWEN_ASR_MODEL,
+            "--workspace-id", args.aliyun_workspace_id, "--region", args.aliyun_region,
+            "--log-file", str(args.work_dir / "qwen_asr.jsonl"),
+            "--mt-model", args.mt_model,
+            "--mt-mode", args.mt_mode,
+            "--context-turns", str(args.context_turns),
+        ])
+        if args.hotword_cards:
+            command.extend(["--hotword-cards", str(Path(args.hotword_cards).expanduser().resolve())])
     if args.hotwords:
         command.extend(["--hotwords", str(Path(args.hotwords).expanduser().resolve())])
     elif args.hotwords_file:
@@ -2379,7 +2404,7 @@ def run_cloud_session(
             state,
             ready,
             connection_state,
-            args.asr_engine in QWEN_LIVE_MODELS or args.translation_engine != "none",
+            args.asr_engine in QWEN_LIVE_MODELS or args.asr_engine == "qwen-audio-stream" or args.translation_engine != "none",
             engine_name,
             session_id,
         ),
@@ -2394,7 +2419,8 @@ def run_cloud_session(
     restart_count = 0
     try:
         # Vocabulary list/create requests can take up to 30s before the WebSocket opens.
-        startup_timeout = 65 if args.asr_engine == "paraformer-mt" and (args.hotwords or args.hotwords_file) else 25
+        startup_timeout = 90 if args.asr_engine in {"paraformer-mt", "qwen-audio-stream"} and (
+        args.hotwords or args.hotwords_file) else 25
         deadline = time.monotonic() + startup_timeout
         while not ready.wait(0.1):
             if stop_event.is_set():
@@ -2621,12 +2647,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--source-language", default="auto", help="FunASR language: auto, zh, en, ja, ko, yue.")
     parser.add_argument(
         "--asr-engine",
-        choices=[*QWEN_LIVE_MODELS, "gummy", "paraformer-mt", "streaming", "sensevoice"],
+        choices=[*QWEN_LIVE_MODELS, "gummy", "paraformer-mt", "qwen-audio-stream", "streaming", "sensevoice"],
         default="qwen3.5-live",
     )
     parser.add_argument("--target-language", default="Chinese", help="Translation target language.")
     parser.add_argument("--translation-engine", choices=["qwen", "none"], default="qwen")
-    parser.add_argument("--mt-model", default="qwen-mt-lite", help="Text translation model for paraformer-mt.")
+    parser.add_argument("--mt-model", default="qwen3.8-max", help="Text translation model for paraformer-mt / qwen-audio-stream.")
+    parser.add_argument("--mt-mode", default="icl", choices=["force", "reference", "background", "icl", "icl2"],
+                        help="Translation prompt mode; icl ships name cards and contrastive examples.")
+    parser.add_argument("--hotword-cards", default="", help="JSON {source: attribute} for ICL name cards.")
+    parser.add_argument("--context-turns", type=int, default=0,
+                        help="Previous subtitles sent as context; 0 disables it (default).")
     glossary_group = parser.add_mutually_exclusive_group()
     glossary_group.add_argument("--hotwords-file", default="", help="Saved source/target terminology JSON file.")
     glossary_group.add_argument("--hotwords", default="", help="External hotword glossary (.txt or JSON).")
@@ -2777,7 +2808,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     audio_holder: Dict[str, Optional[subprocess.Popen]] = {"proc": None}
     cloud_holder: Dict[str, Optional[subprocess.Popen]] = {"proc": None}
     screen_proc: Optional[subprocess.Popen] = None
-    cloud_engines = {"gummy", "paraformer-mt", *QWEN_LIVE_MODELS}
+    cloud_engines = {"gummy", "paraformer-mt", "qwen-audio-stream", *QWEN_LIVE_MODELS}
     if args.asr_engine in cloud_engines:
         worker = threading.Thread(
             target=cloud_stream_loop,
