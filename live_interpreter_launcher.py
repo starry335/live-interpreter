@@ -590,6 +590,9 @@ class Launcher:
         if is_paraformer_mt:
             self.aliyun_region.set("beijing")
             self.visual_enabled.set(False)
+        if self.asr_engine.get() == "qwen3.1-audio" and str(self.gummy_max_end_silence.get()).strip() == "500":
+            # 3.1 builds longer segments; 300 ms keeps subtitle latency close to Paraformer.
+            self.gummy_max_end_silence.set("300")
         self.visual_button.configure(state="disabled" if is_paraformer_mt else "normal")
         is_text_mt = self.asr_engine.get() in {"paraformer-mt", "qwen3.1-audio"}
         self.mt_combo.configure(state="readonly" if is_text_mt else "disabled")
@@ -602,7 +605,10 @@ class Launcher:
         self.silence_entry.configure(state="disabled" if is_qwen38 else "normal")
         self.model_note.configure(text=(
             "Paraformer：仅北京；翻译模型可选；通用大模型关闭深度思考。"
-            if is_paraformer_mt else "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
+            if is_paraformer_mt else
+            "Qwen3.1 流式识别：句末静音建议 300 ms（默认已切换）；翻译模型与热词小抄同上。"
+            if self.asr_engine.get() == "qwen3.1-audio" else
+            "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
         ))
 
     def show_model_pricing(self) -> Toplevel:

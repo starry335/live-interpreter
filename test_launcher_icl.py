@@ -66,6 +66,13 @@ class IclToggleTests(unittest.TestCase):
         hotwords_arg = command[command.index("--hotwords") + 1]
         self.assertTrue(hotwords_arg.endswith("yumemita_bangdream.txt"))
 
+    def test_switching_to_3_1_uses_the_shorter_silence_default(self):
+        app = self.make_app()
+        self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
+        app.asr_engine.set("qwen3.1-audio")
+        app.update_model_controls()
+        self.assertEqual(str(app.gummy_max_end_silence.get()), "300")
+
     def test_qwen_audio_3_1_gets_the_builtin_hotword_list(self):
         app = self.make_app()
         app.asr_engine.set("qwen3.1-audio")
