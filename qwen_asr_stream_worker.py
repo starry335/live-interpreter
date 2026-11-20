@@ -142,6 +142,15 @@ class QwenASRStreamConnection(GummyConnection):
         for warning in self.hotword_config.warnings if self.hotword_config else []:
             LOGGER.warning(warning)
             emit({"event": "warning", "message": warning})
+        emit({
+            "event": "hotword_vocabulary",
+            "asr_terms": len(self.hotword_config.asr_terms()) if self.hotword_config else 0,
+            "mt_terms": len(self.hotword_config.mt_terms()) if self.hotword_config else 0,
+            "vocabulary": len(self.vocabulary),
+            "asr_term_list": (self.hotword_config.asr_terms()[:300] if self.hotword_config else []),
+            "mt_term_list": ([term.source for term in self.hotword_config.mt_terms()][:300]
+                             if self.hotword_config else []),
+        })
 
     def task_request(self) -> Dict[str, object]:
         parameters = {
@@ -230,10 +239,17 @@ class QwenASRStreamConnection(GummyConnection):
             return True
         return any(f"{source}{honorific}" in text for honorific in HONORIFICS)
 
-    def translate(self, text: str) -> str:
+    def translate(self, text: str, sentence_id: str = "") -> str:
         if getattr(self.args, "correct_names", False) and self.hotword_config:
             text = self.hotword_config.correct_kana_surfaces(text)
         terms = self.hotword_config.select_mt_terms(text) if self.hotword_config else []
+        if terms:
+            emit({
+                "event": "hotword_hit",
+                "sentence_id": sentence_id,
+                "source": text[:120],
+                "terms": [{"source": term.source, "target": term.target} for term in terms],
+            })
         if terms and getattr(self.args, "mt_drop_aliases", False):
             alias_sources = {term.source for term in self.hotword_config.aliases}
             terms = [term for term in terms if term.source not in alias_sources]
@@ -306,7 +322,7 @@ class QwenASRStreamConnection(GummyConnection):
             except queue.Empty:
                 continue
             try:
-                translated = self.translate(str(result["source"]))
+                translated = self.translate(str(result["source"]), str(result["sentence_id"]))
                 emit({"event": "result", "sentence_id": result["sentence_id"],
                       "translation": translated, "translation_final": True})
             except urllib.error.HTTPError as exc:

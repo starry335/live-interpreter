@@ -152,6 +152,8 @@ class ParaformerMTConnection(GummyConnection):
                 "vocabulary_id": self.vocabulary_id,
                 "asr_terms": len(self.hotword_config.asr_terms()),
                 "mt_terms": len(self.hotword_config.mt_terms()),
+                "asr_term_list": self.hotword_config.asr_terms()[:300],
+                "mt_term_list": [term.source for term in self.hotword_config.mt_terms()][:300],
                 "weights": sorted(set(weights.values())) if weights else [hotwords.DEFAULT_WEIGHT],
             })
         except Exception as exc:
@@ -208,10 +210,17 @@ class ParaformerMTConnection(GummyConnection):
             return True
         return any(f"{source}{honorific}" in text for honorific in HONORIFICS)
 
-    def translate(self, text: str) -> str:
+    def translate(self, text: str, sentence_id: str = "") -> str:
         if getattr(self.args, "correct_names", False) and self.hotword_config:
             text = self.hotword_config.correct_kana_surfaces(text)
         terms = self.hotword_config.select_mt_terms(text) if self.hotword_config else []
+        if terms:
+            emit({
+                "event": "hotword_hit",
+                "sentence_id": sentence_id,
+                "source": text[:120],
+                "terms": [{"source": term.source, "target": term.target} for term in terms],
+            })
         if terms and getattr(self.args, "mt_drop_aliases", False):
             alias_sources = {term.source for term in self.hotword_config.aliases}
             terms = [term for term in terms if term.source not in alias_sources]
@@ -302,7 +311,7 @@ class ParaformerMTConnection(GummyConnection):
             except queue.Empty:
                 continue
             try:
-                translated = self.translate(str(result["source"]))
+                translated = self.translate(str(result["source"]), str(result["sentence_id"]))
                 emit({"event": "result", "sentence_id": result["sentence_id"], "translation": translated, "translation_final": True})
             except urllib.error.HTTPError as exc:
                 # Do not resend a paid translation automatically: retries can duplicate billing.

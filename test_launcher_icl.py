@@ -52,6 +52,29 @@ class IclToggleTests(unittest.TestCase):
         self.addCleanup(backend_patch.stop)
         self.addCleanup(frozen.stop)
 
+    def test_fresh_install_defaults(self):
+        app = self.make_app()
+        self.assertEqual(app.asr_engine.get(), "paraformer-mt")
+        self.assertEqual(app.mt_model.get(), "qwen3.8-max")
+        self.assertTrue(app.icl_enabled.get())
+        app.update_model_controls()
+        self.assertNotEqual(str(app.icl_check["state"]), "disabled")
+        self.enable_frozen(app)
+        command = app.command()
+        self.assertEqual(command[command.index("--mt-mode") + 1], "icl")
+        self.assertIn("--hotword-cards", command)
+        hotwords_arg = command[command.index("--hotwords") + 1]
+        self.assertTrue(hotwords_arg.endswith("yumemita_bangdream.txt"))
+
+    def test_qwen_audio_3_1_gets_the_builtin_hotword_list(self):
+        app = self.make_app()
+        app.asr_engine.set("qwen3.1-audio")
+        self.enable_frozen(app)
+        command = app.command()
+        self.assertIn("--hotwords", command)
+        self.assertTrue(command[command.index("--hotwords") + 1].endswith("yumemita_bangdream.txt"))
+        self.assertEqual(command[command.index("--mt-mode") + 1], "icl")
+
     def test_icl_is_on_by_default_and_can_be_switched_off(self):
         app = self.make_app()
         app.asr_engine.set("paraformer-mt")

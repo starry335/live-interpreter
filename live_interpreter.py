@@ -2201,8 +2201,17 @@ def handle_cloud_output(
                 state.set_status(f"listening ({engine_name})")
                 print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
         elif event == "hotword_vocabulary":
+            asr_list = message.get("asr_term_list") or []
             print(f"{engine_name} hotwords: {message.get('asr_terms')} ASR terms, "
-                  f"{message.get('mt_terms')} translation terms, vocabulary={message.get('vocabulary_id')}", flush=True)
+                  f"{message.get('mt_terms')} translation terms, vocabulary={message.get('vocabulary_id')}",
+                  flush=True)
+            if asr_list:
+                sample = "、".join(str(term) for term in asr_list[:12])
+                print(f"{engine_name} hotword list: {sample} …（共 {len(asr_list)} 条）", flush=True)
+        elif event == "hotword_hit":
+            terms = message.get("terms") or []
+            pairs = "，".join(f"{term.get('source')}=>{term.get('target')}" for term in terms)
+            print(f"{engine_name} hotword hit [{message.get('sentence_id')}]: {pairs}", flush=True)
         elif event in {"translation_usage", "usage_summary"}:
             print(f"{engine_name} usage: {json.dumps(message, ensure_ascii=True)}", flush=True)
         elif event == "warning":

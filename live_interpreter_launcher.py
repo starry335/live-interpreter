@@ -252,7 +252,7 @@ class Launcher:
         self.source_language = StringVar(value="ja")
         self.target_language = StringVar(value="Chinese")
         self.asr_engine = StringVar(value=os.environ.get("LIVE_INTERPRETER_ASR_ENGINE", "paraformer-mt"))
-        self.mt_model = StringVar(value=os.environ.get("LIVE_INTERPRETER_MT_MODEL", "qwen-mt-plus"))
+        self.mt_model = StringVar(value=os.environ.get("LIVE_INTERPRETER_MT_MODEL", "qwen3.8-max"))
         self.icl_enabled = BooleanVar(value=True)
         self.aliyun_api_key = StringVar(value=os.environ.get("DASHSCOPE_API_KEY", ""))
         self.aliyun_workspace_id = StringVar(
@@ -834,15 +834,19 @@ class Launcher:
             resolved = Path(external_hotwords).expanduser().resolve()
             hotwords.load(resolved)
             cmd.extend(["--hotwords", str(resolved)])
-        elif asr_engine in {"paraformer-mt", "qwen3.5-live", "qwen3.8-live", "gummy"}:
+        elif asr_engine in {"paraformer-mt", "qwen3.1-audio", "qwen3.5-live", "qwen3.8-live", "gummy"}:
             if self.hotwords_path.exists():
                 memory = load_memory(self.hotwords_path)
                 if memory["enabled"] and (memory["terms"] or memory["use_builtin"]):
                     cmd.extend(["--hotwords-file", str(self.hotwords_path)])
             else:
                 default_path = hotwords.builtin_path()
-                hotwords.load(default_path)
+                builtin = hotwords.load(default_path)
                 cmd.extend(["--hotwords", str(default_path)])
+                self.add_log(
+                    f"热词表：内置 {default_path.name}（{len(builtin.pairs)} 条译名 / "
+                    f"{len(builtin.asr_terms())} 条识别词）"
+                )
         return cmd
 
     def audio_test_command(self) -> list[str]:
