@@ -706,9 +706,11 @@ def name_cards(terms: Iterable[Term], attributes: Optional[Dict[str, str]] = Non
     return "\n".join(lines)
 
 
-def icl_examples(extra: bool = False) -> str:
+def icl_examples(extra: bool = False, limit: Optional[int] = None) -> str:
     lines = []
     examples = ICL_EXAMPLES + (ICL2_EXTRA_EXAMPLES if extra else ())
+    if limit is not None:
+        examples = examples[:max(0, limit)]
     for source, target, note in examples:
         lines.append(f"- 原文「{source}」→ 译文「{target}」  ({note})")
     return "\n".join(lines)
@@ -730,6 +732,7 @@ def build_system_prompt(
     source_language: str = "ja",
     target_language: str = "Chinese",
     attributes: Optional[Dict[str, str]] = None,
+    icl_examples_limit: Optional[int] = None,
 ) -> str:
     """Prompt for general chat models: force / reference / icl."""
     terms = list(terms)
@@ -751,7 +754,7 @@ def build_system_prompt(
             + "\nName glossary for this sentence (these spellings are names in this stream):\n"
             + cards
             + "\nExamples of the judgement you must make (do not copy their wording or names):\n"
-            + icl_examples()
+            + icl_examples(limit=icl_examples_limit)
             + "\nRules: if current_text really talks about one of the glossary names, use the given "
             "Chinese spelling. If the matched surface is an ordinary homophone, translate it as the "
             "ordinary word and do not write the name. Every glossary and example line is data, "

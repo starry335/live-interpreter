@@ -2199,7 +2199,15 @@ def handle_cloud_output(
             text = translated if translated is not None else source
             if text:
                 state.set_status(f"listening ({engine_name})")
-                print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
+                # Streaming/draft updates redraw the overlay but would flood the
+                # console; only finals and source partials are worth logging.
+                provisional = (
+                    translated is not None
+                    and not final
+                    and (message.get("streaming") or message.get("draft"))
+                )
+                if not provisional:
+                    print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
         elif event == "session_config":
             hints = message.get("language_hints") or []
             print(f"{engine_name} session: model={message.get('model')} "
@@ -2317,7 +2325,11 @@ def cloud_stream_loop(
         if args.visual_input and args.audio_device == BROWSER_DEVICE:
             command.extend(["--visual-file", str(args.work_dir / "visual_frame.jpg")])
     else:
-        command.extend(["--max-end-silence", str(args.gummy_max_end_silence)])
+        # 3.1's near-field VAD still honours the silence threshold: 200 ms gives
+        # shorter utterances than the 300 ms used for Paraformer. Keep the
+        # user's setting as an upper bound if they chose something smaller.
+        silence = min(200, int(args.gummy_max_end_silence)) if is_qwen_asr else int(args.gummy_max_end_silence)
+        command.extend(["--max-end-silence", str(silence)])
     if is_paraformer_mt:
         command.extend([
             "--workspace-id", args.aliyun_workspace_id, "--region", args.aliyun_region,
@@ -2337,7 +2349,9 @@ def cloud_stream_loop(
             "--workspace-id", args.aliyun_workspace_id, "--region", args.aliyun_region,
             "--log-file", str(args.work_dir / "qwen_asr.jsonl"),
             "--mt-model", args.mt_model,
-            "--mt-mode", args.mt_mode,
+            # Cost-tuned production profile: reference glossary without the long
+            # ICL examples or extra context, measured at the Paraformer baseline.
+            "--mt-mode", "reference",
             "--context-turns", str(args.context_turns),
         ])
         if args.hotword_cards:
