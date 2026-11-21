@@ -298,7 +298,7 @@ class QwenASRStreamConnection(GummyConnection):
             "ritsu": ("りつ", "リツ", "律", "りつちゃん", "リツちゃん", "律ちゃん"),
             "hiro": ("ひろ", "ヒロ", "ヒロちゃん"),
             "yuno": ("ゆの", "ユノ", "ゆのちゃん", "ユノちゃん"),
-            "nonoka": ("ののか", "ノノカ", "ののちゃん", "ノンちゃん"),
+            "nonoka": ("ののか", "ノノカ", "ののちゃん", "ノンちゃん", "のちゃん", "ノちゃん"),
             "miyako": ("みやこ", "ミヤコ", "みやこちゃん", "ミャーコちゃん"),
             "arale": ("あられ", "アラレ", "あられちゃん", "アラレちゃん"),
         }
@@ -320,14 +320,17 @@ class QwenASRStreamConnection(GummyConnection):
                             surfaces[group] = variant
                             break
         if (
-            current_group == "ritsu"
-            and counts.get("ritsu", 0) <= 1
+            current_group in ("ritsu", "nonoka")
+            and counts.get(current_group, 0) <= 1
             and counts.get("hiro", 0) >= 2
             and surfaces.get("hiro")
         ):
-            for variant in groups["ritsu"]:
+            for variant in groups[current_group]:
                 if variant in text:
-                    text = text.replace(variant, surfaces["hiro"])
+                    replacement = surfaces["hiro"]
+                    if variant.endswith("ちゃん") and not replacement.endswith("ちゃん"):
+                        replacement += "ちゃん"
+                    text = text.replace(variant, replacement)
                     break
         self.source_history.append(text)
         del self.source_history[:-8]
