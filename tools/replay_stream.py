@@ -16,7 +16,7 @@ Examples:
 
   # frozen build
   python tools/replay_stream.py --exe dist/LiveInterpreterBackend/LiveInterpreterBackend.exe \\
-    --entry --qwen-asr-worker --wav ... --out ...
+    --entry=--qwen-asr-worker --wav ... --out ...
 """
 from __future__ import annotations
 
