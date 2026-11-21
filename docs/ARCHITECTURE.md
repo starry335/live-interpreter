@@ -31,7 +31,7 @@ flowchart LR
   A[Audio capture] -- "16k PCM" --> Q[qwen-asr-stream worker]
   B -- "spawn / supervise" --> Q
   H[Hotwords] -- "175 ASR / 177 MT" --> Q
-  Q -- "partial source" --> D{"Draft?<br/>> 4 s"}
+  Q -- "partial source" --> D{"Draft? 超过 4 秒"}
   D -- "yes" --> DR[Draft MT<br/>DeepSeek]
   Q -- "final source" --> T[Streaming MT<br/>qwen3.8-max]
   H -- "terms / reference" --> T
