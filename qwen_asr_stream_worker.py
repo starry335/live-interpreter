@@ -35,6 +35,7 @@ from typing import Dict, List, Optional
 
 from gummy_realtime_worker import GummyConnection
 import hotwords
+import warm_names
 
 
 ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming"
@@ -151,6 +152,7 @@ class QwenASRStreamConnection(GummyConnection):
         self.translation_url = f"https://{host}/compatible-mode/v1/chat/completions"
         self.ssl_context = ssl.create_default_context(cafile=self.certifi.where())
         self.translation_context = []
+        self.source_history: List[str] = []
         self.pending: queue.Queue = queue.Queue(maxsize=12)
         self.mt_thread: Optional[threading.Thread] = None
         self.mt_stop = threading.Event()
@@ -176,6 +178,10 @@ class QwenASRStreamConnection(GummyConnection):
         self.hotword_config = (
             hotwords.load(args.hotwords) if str(getattr(args, "hotwords", "")).strip() else None
         )
+        self.context_text = str(
+            getattr(args, "context_text", "")
+            or (self.hotword_config.context if self.hotword_config else "")
+        )[:400]
         cards_path = getattr(args, "hotword_cards", "") or str(hotwords.builtin_cards_path())
         self.name_attributes = hotwords.load_attributes(cards_path) if Path(cards_path).exists() else {}
         self.vocabulary: Dict[str, int] = {}
@@ -227,10 +233,10 @@ class QwenASRStreamConnection(GummyConnection):
         if self.vocabulary:
             parameters["vocabulary"] = dict(list(self.vocabulary.items())[:2000])
         task_input = {}
-        if str(getattr(self.args, "context_text", "")).strip():
+        if self.context_text:
             task_input["context"] = [{
                 "role": "user",
-                "content": [{"type": "input_text", "text": str(self.args.context_text)[:400]}],
+                "content": [{"type": "input_text", "text": self.context_text}],
             }]
         return {
             "header": {"action": "run-task", "task_id": self.task_id, "streaming": "duplex"},
@@ -267,6 +273,53 @@ class QwenASRStreamConnection(GummyConnection):
         super().send_audio(data)
         self.audio_bytes += len(data)
 
+    def _correct_name_consistency(self, text: str) -> str:
+        """Replace a one-off hotword name with the name used in nearby lines.
+
+        The 3.1 vocabulary treats short member names as a closed class; an
+        unknown game character such as ひろちゃん can be written as 律ちゃん.
+        If two of the previous three finals use another name and this final is
+        the only occurrence of the hotword name, prefer the neighbouring name.
+        Real name switches repeat in the window and are left alone.
+        """
+        groups = {
+            "ritsu": ("りつ", "リツ", "律", "りつちゃん", "リツちゃん", "律ちゃん"),
+            "hiro": ("ひろ", "ヒロ", "ヒロちゃん"),
+            "yuno": ("ゆの", "ユノ", "ゆのちゃん", "ユノちゃん"),
+            "nonoka": ("ののか", "ノノカ", "ののちゃん", "ノンちゃん"),
+            "miyako": ("みやこ", "ミヤコ", "みやこちゃん", "ミャーコちゃん"),
+            "arale": ("あられ", "アラレ", "あられちゃん", "アラレちゃん"),
+        }
+        window = self.source_history[-3:] + [text]
+        counts: Dict[str, int] = {}
+        surfaces: Dict[str, str] = {}
+        current_group = ""
+        for group, variants in groups.items():
+            for variant in variants:
+                if variant in text:
+                    current_group = group
+                    break
+            count = sum(1 for line in window if any(v in line for v in variants))
+            if count:
+                counts[group] = count
+                for line in window:
+                    for variant in variants:
+                        if variant in line:
+                            surfaces[group] = variant
+                            break
+        if current_group and counts.get(current_group, 0) <= 1:
+            rivals = [(count, group) for group, count in counts.items() if group != current_group]
+            if rivals:
+                count, group = max(rivals)
+                if count >= 2 and surfaces.get(group):
+                    for variant in groups[current_group]:
+                        if variant in text:
+                            text = text.replace(variant, surfaces[group])
+                            break
+        self.source_history.append(text)
+        del self.source_history[:-8]
+        return text
+
     def _emit_result(self, message: Dict[str, object]) -> None:
         payload = message.get("payload") or {}
         output = payload.get("output") or {}
@@ -287,6 +340,8 @@ class QwenASRStreamConnection(GummyConnection):
         final = bool(sentence.get("sentence_end"))
         if final and sentence_id in self.seen_sentences:
             return
+        if final:
+            text = self._correct_name_consistency(text)
         result = {
             "event": "result", "sentence_id": sentence_id, "source": text,
             "source_final": final, "begin_time": sentence.get("begin_time"),
@@ -322,6 +377,10 @@ class QwenASRStreamConnection(GummyConnection):
         if getattr(self.args, "correct_names", False) and self.hotword_config:
             text = self.hotword_config.correct_kana_surfaces(text)
         terms = self.hotword_config.select_mt_terms(text) if self.hotword_config else []
+        warm_terms = [hotwords.Term(source, target) for source, target in warm_names.retrieve(text)]
+        if warm_terms:
+            seen_sources = {term.source for term in terms}
+            terms = list(terms) + [term for term in warm_terms if term.source not in seen_sources]
         if terms:
             emit({
                 "event": "hotword_hit",
