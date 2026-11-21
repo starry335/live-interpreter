@@ -270,6 +270,8 @@ python tools/replay_stream.py --wav gold-v0.3/audio/xxx.wav --out runs/31_ref --
 2–5 分钟参考结果：3.1 reference 首次中文 p50 **1.34 s**、charF1 **0.445**、人名召回 **92.3%**、成本 **2.74 元/h**；
 Paraformer 基线分别是 1.77 s / 0.430 / 76.9% / 2.71 元/h。详见 `docs/BENCHMARK_V03.md`。
 
+模块框图（基线 vs 3.1 主推）见 `docs/ARCHITECTURE.md`。
+
 ## 依赖说明
 
 独立安装版自带 Python 3.11 运行时、`websocket-client`、`certifi` 和 Tcl/Tk，只使用云端实时模型，不要求显卡。
