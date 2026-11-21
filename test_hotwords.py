@@ -61,6 +61,16 @@ class HotwordFileTests(unittest.TestCase):
         self.assertEqual(config.asr_terms(), ["千石ユノ", "ユノ"])
         self.assertEqual([(t.source, t.target) for t in config.forbidden], [("战国由乃", "由乃")])
 
+    def test_asr_replace_uses_only_listed_surfaces(self):
+        path = self.write(
+            "asr_replace.txt",
+            "[hotwords]\nあられ => 阿拉蕾\n峰月律 => 律\n[asr-replace]\nアラレ\n峰月律\n",
+        )
+        config = hotwords.load(path)
+        self.assertTrue(config.asr_replace)
+        self.assertEqual(config.asr_terms(), ["アラレ", "峰月律"])
+        self.assertEqual([t.source for t in config.mt_terms()], ["あられ", "峰月律"])
+
     def test_duplicate_source_keeps_first_and_warns(self):
         path = self.write("dup.txt", "あられ => 阿拉蕾\nあられ => 亚蕾\n")
         config = hotwords.load(path)
