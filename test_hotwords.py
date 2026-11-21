@@ -48,6 +48,8 @@ class HotwordFileTests(unittest.TestCase):
         self.assertNotIn("戦国ユーノ", config.asr_terms())
         self.assertEqual(config.postprocess("战国由乃和拉卡马奇奥尔雷"), "由乃和阿拉蕾")
         self.assertEqual(config.postprocess("正常文本"), "正常文本")
+        self.assertEqual(config.postprocess("都酱来了"), "都子酱来了")
+        self.assertEqual(config.postprocess("みやこ酱来了"), "都子酱来了")
 
     def test_sections_and_derived_forbidden_target(self):
         path = self.write(

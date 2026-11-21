@@ -266,6 +266,9 @@ class HotwordConfig:
         for term in sorted(self.forbidden, key=lambda item: -len(item.source)):
             if term.source and term.source != term.target:
                 out = out.replace(term.source, term.target)
+        # 都子 is a two-character Chinese given name; never shorten it to 都酱.
+        out = out.replace("みやこ酱", "都子酱").replace("みやこちゃん", "都子酱")
+        out = out.replace("都酱", "都子酱")
         return out.strip()
 
     def summary(self) -> Dict[str, object]:
@@ -744,6 +747,10 @@ def build_system_prompt(
         "Preserve names, numbers, tone and meaning. Use context to resolve ambiguity, "
         "but never invent missing facts. Do not add explanations or headings."
     )
+    if any(term.target.startswith("都子") for term in terms) and str(target_language).lower() in {
+        "chinese", "zh", "zh-cn", "zh-tw",
+    }:
+        base += " 带「ちゃん」时写完整的「都子酱」，绝不能写成「都酱」。"
     if not terms:
         return base
     pairs = "; ".join(f"{term.source}=>{term.target}" for term in terms)
