@@ -173,15 +173,16 @@ class HotwordConfig:
                 break
         return result
 
-    def asr_weights(self, default_weight: int) -> Dict[str, int]:
+    def asr_weights(self, default_weight: int, include_warm: bool = True) -> Dict[str, int]:
         """Hot terms keep the caller's weight; warm terms stay at 1."""
         weights: Dict[str, int] = {}
         for term in self.asr_terms():
             weights[term] = default_weight
-        for term in self.asr_warm:
-            term = term.strip()
-            if term:
-                weights[term] = 1
+        if include_warm:
+            for term in self.asr_warm:
+                term = term.strip()
+                if term:
+                    weights[term] = 1
         return weights
 
     def mt_terms(self) -> List[Term]:

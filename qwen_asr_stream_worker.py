@@ -103,6 +103,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Kana-only terms at least this long skip the honorific requirement.")
     parser.add_argument("--context-turns", type=int, default=0,
                         help="Previous subtitles sent as context; 0 disables it (default).")
+    parser.add_argument("--short-context-chars", type=int, default=0,
+                        help="Also send one previous subtitle when the source is at most this many chars (0 disables).")
+    parser.add_argument("--short-context-turns", type=int, default=1,
+                        help="How many previous subtitles to send for a short source.")
     parser.add_argument("--vad-model", default="", choices=["", "near_meeting_16k", "far_field_meeting_16k"],
                         help="3.1 only; empty keeps the server default.")
     parser.add_argument("--speech-noise-threshold", type=float, default=None,
@@ -135,6 +139,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Background context for qwen-audio-3.1 input.context (names, readings, domain).")
     parser.add_argument("--correct-names", action="store_true",
                         help="Snap near-miss kana name spellings onto known readings before MT.")
+    parser.add_argument("--warm-names", action=argparse.BooleanOptionalAction, default=True,
+                        help="Recall game/anime names by pronunciation for the final MT prompt.")
+    parser.add_argument("--name-consistency", action=argparse.BooleanOptionalAction, default=True,
+                        help="Prefer the neighbouring name when one final uses a lone hotword name.")
+    parser.add_argument("--asr-warm", action=argparse.BooleanOptionalAction, default=True,
+                        help="Send [asr-warm] terms at weight 1; --no-asr-warm keeps the hot list only.")
     args = parser.parse_args(argv)
     if args.workspace_id and not re.fullmatch(r"[A-Za-z0-9-]+", args.workspace_id):
         parser.error("Workspace ID must contain only letters, digits and hyphens.")
@@ -189,7 +199,9 @@ class QwenASRStreamConnection(GummyConnection):
         if args.vocabulary_file:
             self.vocabulary = dict(list(load_vocabulary(args.vocabulary_file).items())[:vocabulary_limit])
         elif self.hotword_config:
-            for term, weight in self.hotword_config.asr_weights(args.vocabulary_weight).items():
+            for term, weight in self.hotword_config.asr_weights(
+                args.vocabulary_weight, include_warm=bool(getattr(args, "asr_warm", True))
+            ).items():
                 if len(self.vocabulary) >= vocabulary_limit:
                     break
                 self.vocabulary[term] = weight
@@ -307,15 +319,16 @@ class QwenASRStreamConnection(GummyConnection):
                         if variant in line:
                             surfaces[group] = variant
                             break
-        if current_group and counts.get(current_group, 0) <= 1:
-            rivals = [(count, group) for group, count in counts.items() if group != current_group]
-            if rivals:
-                count, group = max(rivals)
-                if count >= 2 and surfaces.get(group):
-                    for variant in groups[current_group]:
-                        if variant in text:
-                            text = text.replace(variant, surfaces[group])
-                            break
+        if (
+            current_group == "ritsu"
+            and counts.get("ritsu", 0) <= 1
+            and counts.get("hiro", 0) >= 2
+            and surfaces.get("hiro")
+        ):
+            for variant in groups["ritsu"]:
+                if variant in text:
+                    text = text.replace(variant, surfaces["hiro"])
+                    break
         self.source_history.append(text)
         del self.source_history[:-8]
         return text
@@ -341,7 +354,11 @@ class QwenASRStreamConnection(GummyConnection):
         if final and sentence_id in self.seen_sentences:
             return
         if final:
-            text = self._correct_name_consistency(text)
+            if bool(getattr(self.args, "name_consistency", True)):
+                text = self._correct_name_consistency(text)
+            else:
+                self.source_history.append(text)
+                del self.source_history[:-8]
         result = {
             "event": "result", "sentence_id": sentence_id, "source": text,
             "source_final": final, "begin_time": sentence.get("begin_time"),
@@ -377,7 +394,9 @@ class QwenASRStreamConnection(GummyConnection):
         if getattr(self.args, "correct_names", False) and self.hotword_config:
             text = self.hotword_config.correct_kana_surfaces(text)
         terms = self.hotword_config.select_mt_terms(text) if self.hotword_config else []
-        warm_terms = [hotwords.Term(source, target) for source, target in warm_names.retrieve(text)]
+        warm_terms = []
+        if bool(getattr(self.args, "warm_names", True)):
+            warm_terms = [hotwords.Term(source, target) for source, target in warm_names.retrieve(text)]
         if warm_terms:
             seen_sources = {term.source for term in terms}
             terms = list(terms) + [term for term in warm_terms if term.source not in seen_sources]
@@ -409,6 +428,14 @@ class QwenASRStreamConnection(GummyConnection):
                 icl_examples_limit=self._icl_limit())
         context_turns = max(0, int(getattr(self.args, "context_turns", 0)))
         context = self.translation_context[-context_turns:] if context_turns else []
+        short_limit = max(0, int(getattr(self.args, "short_context_chars", 0)))
+        if not context and short_limit and len(text) <= short_limit:
+            short_turns = max(1, int(getattr(self.args, "short_context_turns", 1)))
+            context = self.translation_context[-short_turns:]
+            system_prompt += (
+                "\n这是实时字幕里的短句。结合上一句译成自然中文；"
+                "不要逐词直译，也不要重复上一句。只输出当前句译文。"
+            )
         if context:
             user_content = json.dumps(
                 {"previous_subtitles": context, "current_text": text}, ensure_ascii=False
