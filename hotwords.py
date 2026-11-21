@@ -34,6 +34,8 @@ Sections are optional and make long lists easier to read::
     ユノ
     [asr-replace]
     # optional: use exactly these ASR surfaces, while [hotwords] still drives MT
+    [context]
+    作品『…』の登場人物: 二階堂ヒロ(ヒロちゃん)、…
     [forbidden]
     战国由乃 => 由乃
 
@@ -115,7 +117,7 @@ _HEADER_RE = re.compile(r"^\[([A-Za-z_-]+)\]$")
 _KANA_RE = re.compile(r"[ぁ-ゖァ-ヺ]")
 _KANJI_RE = re.compile(r"[\u4e00-\u9fff]")
 _KANA_RUN_RE = re.compile(r"[\u3040-\u30ffー]+")
-_SECTIONS = {"hotwords", "terms", "aliases", "asr", "asr-replace", "forbidden"}
+_SECTIONS = {"hotwords", "terms", "aliases", "asr", "asr-replace", "asr-warm", "context", "forbidden"}
 
 
 class HotwordError(ValueError):
@@ -144,7 +146,9 @@ class HotwordConfig:
     aliases: List[Term] = field(default_factory=list)
     forbidden: List[Term] = field(default_factory=list)
     asr_only: List[str] = field(default_factory=list)
+    asr_warm: List[str] = field(default_factory=list)
     asr_replace: bool = False
+    context: str = ""
     warnings: List[str] = field(default_factory=list)
 
     def asr_terms(self) -> List[str]:
@@ -152,7 +156,7 @@ class HotwordConfig:
         if self.asr_replace:
             values = list(self.asr_only)
         else:
-            values = [term.source for term in self.pairs] + list(self.asr_only)
+            values = [term.source for term in self.pairs] + list(self.asr_only) + list(self.asr_warm)
         result: List[str] = []
         seen = set()
         for value in values:
@@ -168,6 +172,17 @@ class HotwordConfig:
             if len(result) >= MAX_ASR_TERMS:
                 break
         return result
+
+    def asr_weights(self, default_weight: int) -> Dict[str, int]:
+        """Hot terms keep the caller's weight; warm terms stay at 1."""
+        weights: Dict[str, int] = {}
+        for term in self.asr_terms():
+            weights[term] = default_weight
+        for term in self.asr_warm:
+            term = term.strip()
+            if term:
+                weights[term] = 1
+        return weights
 
     def mt_terms(self) -> List[Term]:
         """Source -> target pairs for Qwen-MT / LiveTranslate corpora."""
@@ -283,7 +298,9 @@ class HotwordConfig:
             "pairs": len(self.pairs),
             "aliases": len(self.aliases),
             "asr_only": len(self.asr_only),
+            "asr_warm": len(self.asr_warm),
             "asr_replace": self.asr_replace,
+            "context_chars": len(self.context),
             "forbidden": len(self.forbidden),
             "asr_terms": len(self.asr_terms()),
             "mt_terms": len(self.mt_terms()),
@@ -373,6 +390,11 @@ def _load_text(path: Path) -> HotwordConfig:
                     config.asr_replace = True
             continue
 
+        if section == "context":
+            if line:
+                config.context = (config.context + " " + line).strip()[:400]
+            continue
+
         marker = ""
         if line[:1] in {"~", "!"}:
             marker, line = line[0], line[1:].strip()
@@ -404,10 +426,13 @@ def _load_text(path: Path) -> HotwordConfig:
         if target:
             _add_term(config.pairs, pairs_seen, source, target, "term", config.warnings, str(path))
             canonical_targets.append(target)
-        elif section in {"hotwords", "terms", "asr", "asr-replace"}:
+        elif section in {"hotwords", "terms", "asr", "asr-replace", "asr-warm"}:
             if source not in asr_seen:
                 asr_seen.add(source)
-                config.asr_only.append(source)
+                if section == "asr-warm":
+                    config.asr_warm.append(source)
+                else:
+                    config.asr_only.append(source)
         else:
             config.warnings.append(f"{path}:{number}: entry without target, ignored")
 
@@ -475,14 +500,14 @@ def _load_kb_terms(path: Path) -> HotwordConfig:
 
 
 def _finish(config: HotwordConfig, path: Path) -> None:
-    if not config.pairs and not config.aliases and not config.asr_only:
+    if not config.pairs and not config.aliases and not config.asr_only and not config.asr_warm:
         config.warnings.append(f"{path}: no usable hotword terms found")
     if len(config.pairs) + len(config.aliases) > MAX_MT_TERMS:
         config.warnings.append(
             f"{path}: {len(config.pairs) + len(config.aliases)} translation terms exceed "
             f"the {MAX_MT_TERMS}-term request cap; only the first {MAX_MT_TERMS} are used"
         )
-    raw_asr = len(config.asr_only) if config.asr_replace else len(config.pairs) + len(config.asr_only)
+    raw_asr = len(config.asr_only) if config.asr_replace else len(config.pairs) + len(config.asr_only) + len(config.asr_warm)
     if raw_asr > MAX_ASR_TERMS:
         config.warnings.append(
             f"{path}: {raw_asr} ASR surfaces exceed the {MAX_ASR_TERMS}-term vocabulary cap; "

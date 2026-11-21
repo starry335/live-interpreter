@@ -84,7 +84,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--vocabulary-file", default="",
                         help="Instant ASR vocabulary JSON {term: weight}; enables parameters.vocabulary.")
     parser.add_argument("--vocabulary-weight", type=int, default=5)
-    parser.add_argument("--asr-vocabulary-limit", type=int, default=175,
+    parser.add_argument("--asr-vocabulary-limit", type=int, default=300,
                         help="Cap instant ASR vocabulary terms; keeps the task request small "
                              "enough for long 3.1 sessions.")
     parser.add_argument("--mt-mode", choices=["force", "reference", "background", "icl", "icl2"], default="icl",
@@ -189,10 +189,10 @@ class QwenASRStreamConnection(GummyConnection):
         if args.vocabulary_file:
             self.vocabulary = dict(list(load_vocabulary(args.vocabulary_file).items())[:vocabulary_limit])
         elif self.hotword_config:
-            for term in self.hotword_config.asr_terms():
+            for term, weight in self.hotword_config.asr_weights(args.vocabulary_weight).items():
                 if len(self.vocabulary) >= vocabulary_limit:
                     break
-                self.vocabulary[term] = args.vocabulary_weight
+                self.vocabulary[term] = weight
         for warning in self.hotword_config.warnings if self.hotword_config else []:
             LOGGER.warning(warning)
             emit({"event": "warning", "message": warning})

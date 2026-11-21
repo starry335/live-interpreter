@@ -71,6 +71,25 @@ class HotwordFileTests(unittest.TestCase):
         self.assertEqual(config.asr_terms(), ["アラレ", "峰月律"])
         self.assertEqual([t.source for t in config.mt_terms()], ["あられ", "峰月律"])
 
+    def test_context_section_is_kept_for_asr(self):
+        path = self.write(
+            "context.txt",
+            "[hotwords]\nヒロ => 希罗\n[context]\n作品『X』の登場人物: ヒロ(ヒロちゃん)。\n",
+        )
+        config = hotwords.load(path)
+        self.assertIn("ヒロ(ヒロちゃん)", config.context)
+        self.assertEqual(config.summary()["context_chars"], len(config.context))
+
+    def test_asr_warm_terms_get_weight_one(self):
+        path = self.write(
+            "warm.txt",
+            "[hotwords]\nあられ => 阿拉蕾\n[asr-warm]\nひろ\n",
+        )
+        config = hotwords.load(path)
+        weights = config.asr_weights(5)
+        self.assertEqual(weights["あられ"], 5)
+        self.assertEqual(weights["ひろ"], 1)
+
     def test_duplicate_source_keeps_first_and_warns(self):
         path = self.write("dup.txt", "あられ => 阿拉蕾\nあられ => 亚蕾\n")
         config = hotwords.load(path)

@@ -28,6 +28,7 @@ def _kata_to_hira(text: str) -> str:
 class WarmName:
     aliases: Tuple[str, ...]
     target: str
+    add_honorific: bool = True
 
 
 # Priority: MewType is already in the hot list; this table covers the
@@ -143,11 +144,18 @@ NAMES: Tuple[WarmName, ...] = (
     # 丸君 / 薇欧拉
     WarmName(("まるくん", "マルクン", "marukun"), "丸君"),
     WarmName(("う゛ぃおら", "ヴィオラ", "Viola", "びおら"), "薇欧拉"),
-    # 家庭成员 / 宠物（中文站常用称呼）
-    WarmName(("ママまち", "まままち"), "妈妈町"),
-    WarmName(("パパまち", "ぱぱまち"), "爸爸町"),
-    WarmName(("弟まち", "おとうとまち", "弟まちちゃん"), "弟弟町"),
-    WarmName(("ぽんちゃん", "ポンちゃん"), "Pon酱"),
+    # 家庭成员 / 宠物（中文站常用称呼；家庭成员不加敬称）
+    WarmName(("ママまち", "まままち", "mamaまち"), "妈妈町", False),
+    WarmName(("パパまち", "ぱぱまち", "papaまち"), "爸爸町", False),
+    WarmName(("おとうとまち", "おととまち", "ototoまち", "弟まち"), "弟弟町", False),
+    WarmName(("ママちー", "ままちー", "mamaちー"), "妈妈Chi", False),
+    WarmName(("パパちー", "ぱぱちー", "papaちー"), "爸爸Chi", False),
+    WarmName(("ママなが", "ままなが", "mamaなが", "ママ永", "mama永"), "妈妈永", False),
+    WarmName(("パパなが", "ぱぱなが", "papaなが", "パパ永", "papa永"), "爸爸永", False),
+    WarmName(("ママりつ", "ままりつ", "mamaりつ", "ママ律", "mama律"), "妈妈律", False),
+    WarmName(("パパりつ", "ぱぱりつ", "papaりつ", "パパ律", "papa律", "パパリツ"), "爸爸律", False),
+    WarmName(("めいちゃん", "メイちゃん", "meiちゃん"), "娃娃", False),
+    WarmName(("ぽんちゃん", "ポンちゃん"), "Pon酱", False),
 )
 
 
@@ -175,14 +183,14 @@ def retrieve(text: str, limit: int = 6) -> List[Tuple[str, str]]:
             honorific = any(norm.startswith(h, end) for h in _HONORIFICS)
             # Short given names are extremely common words (ここ, あや, ひな…).
             # Only trust them when the speaker actually attaches an honorific.
-            if len(alias_norm) <= 3 and not honorific:
+            if len(alias_norm) <= 3 and not honorific and name.add_honorific:
                 continue
             if not honorific and not _has_boundary(norm, start, end):
                 continue
             # Prefer the surface as written in the source (kana/katakana).
             surface = text[start:end] if text[start:end].lower() == alias.lower() else alias
             target = name.target
-            if norm.startswith("ちゃん", end):
+            if name.add_honorific and norm.startswith("ちゃん", end):
                 target += "酱"
             found.append((start, end, len(alias_norm), surface, target))
             break
