@@ -100,10 +100,10 @@ class CloudEncodingTests(unittest.TestCase):
                 buttons = [button for child in dialog.winfo_children() for button in child.winfo_children()
                            if isinstance(button, ttk.Button)]
                 apply_button = next(button for button in buttons if button["text"] == "使用选中模型")
-                self.assertEqual(len(table.get_children()), 7)
+                self.assertEqual(len(table.get_children()), len(live_interpreter_launcher.MT_PRICES))
                 self.assertEqual({row[0] for row in live_interpreter_launcher.MT_PRICES}, set(paraformer_mt_worker.MT_MODELS))
                 self.assertEqual(table.selection(), ("2",))
-                self.assertEqual(tuple(table.item("2", "values")[1:]), ("1.80", "5.40", "0.132", "0.996"))
+                self.assertEqual(tuple(table.item("2", "values")[1:]), ("1.80", "5.40", "0.113", "0.977", "0.386"))
                 table.selection_set("6")
                 with mock.patch.object(launcher, "is_running", return_value=True):
                     apply_button.invoke()

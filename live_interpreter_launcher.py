@@ -30,7 +30,8 @@ STRING_SETTINGS = (
     "overlay_geometry", "overlay_font_size", "overlay_hold_seconds", "port", "overlay_mode",
     "work_dir", "hotwords",
 )
-BOOL_SETTINGS = ("overlay_enabled", "overlay_show_source", "record_screen", "translate_enabled", "visual_enabled")
+BOOL_SETTINGS = ("overlay_enabled", "overlay_show_source", "record_screen", "translate_enabled",
+                 "visual_enabled", "icl_enabled")
 ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr_py38"))
 ENV_PYTHON = ENV_ROOT / "python.exe"
 FFMPEG = ENV_ROOT / "Library" / "bin" / "ffmpeg.exe"
@@ -44,14 +45,27 @@ EDGE_TAB_DEVICE = "__edge_tab_audio__"
 OVERLAY_MODES = {"桌面透明悬浮窗": "desktop", "直播透明窗口（免抠像）": "alpha"}
 MODEL_PRICING_URL = "https://help.aliyun.com/zh/model-studio/model-pricing"
 # Beijing standard prices (CNY / million text tokens), checked 2026-10-25.
+# (model, label, input_price, output_price, input_tokens, output_tokens)
+# Token counts follow the 887 s reference sample with context turned off:
+# 9,390 input / 2,008 output; the ICL rows use the measured +44% prompt growth.
 MT_PRICES = (
-    ("qwen-mt-lite", "qwen-mt-lite", 0.60, 1.60),
-    ("qwen-mt-flash", "qwen-mt-flash", 0.70, 1.95),
-    ("qwen-mt-plus", "qwen-mt-plus", 1.80, 5.40),
-    ("qwen3.8-flash", "qwen3.8-flash", 0.80, 2.70),
-    ("qwen3.8-max", "qwen3.8-max", 12.00, 36.00),
-    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（忙时）", 2.00, 8.00),
-    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（闲时）", 1.00, 4.00),
+    ("qwen-mt-lite", "qwen-mt-lite", 0.60, 1.60, 9390, 2008),
+    ("qwen-mt-flash", "qwen-mt-flash", 0.70, 1.95, 9390, 2008),
+    ("qwen-mt-plus", "qwen-mt-plus", 1.80, 5.40, 9390, 2008),
+    ("qwen3.8-flash", "qwen3.8-flash", 0.80, 2.70, 9390, 2008),
+    ("qwen3.8-max", "qwen3.8-max", 12.00, 36.00, 9390, 2008),
+    ("qwen3.8-max", "qwen3.8-max + ICL", 12.00, 36.00, 13527, 2008),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（忙时）", 2.00, 8.00, 9390, 2008),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（忙时）+ ICL", 2.00, 8.00, 13527, 2008),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（闲时）", 1.00, 4.00, 9390, 2008),
+    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（闲时）+ ICL", 1.00, 4.00, 13527, 2008),
+)
+
+# (engine, label, cny_per_hour, note)
+ASR_PRICES = (
+    ("paraformer-realtime-v2", "Paraformer-Realtime-V2", 0.864, "0.00024 元/秒"),
+    ("qwen-audio-3.0-asr-flash-streaming", "qwen-audio-3.0（流式）", 1.188, "0.00033 元/秒"),
+    ("qwen-audio-3.1-asr-flash-streaming", "qwen-audio-3.1（流式）", 0.273, "6/4.5 元每百万 token，实测 9,680 入 + 2,023 出 /887 秒"),
 )
 
 
@@ -76,11 +90,19 @@ def launcher_settings_path() -> Path:
     return hotword_memory_path().with_name("settings.json")
 
 
-def backend_executable_path() -> Path:
-    candidates = [
-        install_root() / "backend" / "LiveInterpreterBackend.exe",
+def backend_executable_candidates() -> list[Path]:
+    root = install_root()
+    return [
+        root / "backend" / "LiveInterpreterBackend.exe",
         app_dir() / "LiveInterpreterBackend.exe",
+        # raw PyInstaller dist layout: dist/LiveInterpreter + dist/LiveInterpreterBackend
+        app_dir().parent / "LiveInterpreterBackend" / "LiveInterpreterBackend.exe",
+        root.parent / "LiveInterpreterBackend" / "LiveInterpreterBackend.exe",
     ]
+
+
+def backend_executable_path() -> Path:
+    candidates = backend_executable_candidates()
     return next((path for path in candidates if path.exists()), candidates[0])
 
 
@@ -238,7 +260,8 @@ class Launcher:
         self.source_language = StringVar(value="ja")
         self.target_language = StringVar(value="Chinese")
         self.asr_engine = StringVar(value=os.environ.get("LIVE_INTERPRETER_ASR_ENGINE", "paraformer-mt"))
-        self.mt_model = StringVar(value=os.environ.get("LIVE_INTERPRETER_MT_MODEL", "qwen-mt-plus"))
+        self.mt_model = StringVar(value=os.environ.get("LIVE_INTERPRETER_MT_MODEL", "qwen3.8-max"))
+        self.icl_enabled = BooleanVar(value=True)
         self.aliyun_api_key = StringVar(value=os.environ.get("DASHSCOPE_API_KEY", ""))
         self.aliyun_workspace_id = StringVar(
             value=os.environ.get("DASHSCOPE_WORKSPACE_ID", "")
@@ -275,7 +298,10 @@ class Launcher:
             return
         for name in STRING_SETTINGS:
             if isinstance(saved.get(name), str):
-                getattr(self, name).set(saved[name])
+                value = saved[name]
+                if name == "asr_engine" and value == "qwen-audio-stream":
+                    value = "qwen3.1-audio"
+                getattr(self, name).set(value)
         for name in BOOL_SETTINGS:
             if type(saved.get(name)) is bool:
                 getattr(self, name).set(saved[name])
@@ -373,9 +399,10 @@ class Launcher:
             asr_box,
             textvariable=self.asr_engine,
             values=(
-                ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt")
+                ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen3.1-audio")
                 if getattr(sys, "frozen", False)
-                else ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "sensevoice", "streaming")
+                else ("qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen3.1-audio",
+                      "sensevoice", "streaming")
             ),
             state="readonly",
             width=15,
@@ -420,6 +447,10 @@ class Launcher:
         )
         self.mt_combo.pack(side=LEFT, fill="x", expand=True)
         ttk.Button(mt_row, text="收费对比", command=self.show_model_pricing).pack(side=LEFT, padx=(8, 0))
+        self.icl_check = ttk.Checkbutton(
+            mt_row, text="热词小抄 (ICL)", variable=self.icl_enabled, command=self.schedule_settings_save,
+        )
+        self.icl_check.pack(side=LEFT, padx=(8, 0))
 
         hotword_row = ttk.Frame(cloud_box)
         hotword_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(7, 0))
@@ -567,15 +598,25 @@ class Launcher:
         if is_paraformer_mt:
             self.aliyun_region.set("beijing")
             self.visual_enabled.set(False)
+        if self.asr_engine.get() == "qwen3.1-audio" and str(self.gummy_max_end_silence.get()).strip() == "500":
+            # 3.1 builds longer segments; 300 ms keeps subtitle latency close to Paraformer.
+            self.gummy_max_end_silence.set("300")
         self.visual_button.configure(state="disabled" if is_paraformer_mt else "normal")
-        self.mt_combo.configure(state="readonly" if is_paraformer_mt else "disabled")
+        is_text_mt = self.asr_engine.get() in {"paraformer-mt", "qwen3.1-audio"}
+        self.mt_combo.configure(state="readonly" if is_text_mt else "disabled")
+        if hasattr(self, "icl_check"):
+            supports_icl = is_text_mt and not self.mt_model.get().startswith("qwen-mt-")
+            self.icl_check.configure(state="normal" if supports_icl else "disabled")
         if is_qwen38:
             self.source_language.set("auto")
         self.source_combo.configure(state="disabled" if is_qwen38 else "readonly")
         self.silence_entry.configure(state="disabled" if is_qwen38 else "normal")
         self.model_note.configure(text=(
             "Paraformer：仅北京；翻译模型可选；通用大模型关闭深度思考。"
-            if is_paraformer_mt else "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
+            if is_paraformer_mt else
+            "Qwen3.1 流式识别：句末静音建议 300 ms（默认已切换）；翻译模型与热词小抄同上。"
+            if self.asr_engine.get() == "qwen3.1-audio" else
+            "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
         ))
 
     def show_model_pricing(self) -> Toplevel:
@@ -585,8 +626,8 @@ class Launcher:
             return previous
         dialog = self.pricing_window = Toplevel(self.root)
         dialog.title("翻译模型收费对比 · 阿里云百炼北京")
-        dialog.geometry("960x460")
-        dialog.minsize(900, 460)
+        dialog.geometry("1120x520")
+        dialog.minsize(1040, 520)
         dialog.transient(self.root)
         ttk.Label(
             dialog, text="北京地域标准价 · 更新于 2026-10-25 · 适用于 Paraformer + 文本翻译模式",
@@ -595,28 +636,41 @@ class Launcher:
             dialog, text="输入/输出单价：元/百万 Token；小时费用：元/小时。选择一行，点击“使用选中模型”。",
         ).pack(anchor="w", padx=14, pady=(0, 8))
         table = ttk.Treeview(
-            dialog, columns=("model", "input", "output", "translation", "total"),
+            dialog, columns=("model", "input", "output", "translation", "total", "total31"),
             show="headings", selectmode="browse", height=len(MT_PRICES),
         )
         for column, title, width in (
             ("model", "翻译模型", 300), ("input", "输入单价", 100),
-            ("output", "输出单价", 100), ("translation", "翻译费估算/小时", 150),
-            ("total", "识别+翻译估算/小时", 170),
+            ("output", "输出单价", 100), ("translation", "翻译费估算/小时", 140),
+            ("total", "识别 Paraformer + 翻译/小时", 180),
+            ("total31", "识别 3.1 + 翻译/小时", 170),
         ):
             table.heading(column, text=title)
             table.column(column, width=width, minwidth=width, anchor="w" if column == "model" else "center")
-        for index, (model, label, input_price, output_price) in enumerate(MT_PRICES):
-            translation_hour = (12032 * input_price + 2008 * output_price) / 1_000_000 * 3600 / 887
+        for index, (model, label, input_price, output_price, input_tokens, output_tokens) in enumerate(MT_PRICES):
+            translation_hour = (input_tokens * input_price + output_tokens * output_price) / 1_000_000 * 3600 / 887
             table.insert("", END, iid=str(index), values=(
                 label, f"{input_price:.2f}", f"{output_price:.2f}",
                 f"{translation_hour:.3f}", f"{translation_hour + 0.864:.3f}",
+                f"{translation_hour + 0.273:.3f}",
             ))
         current = next((str(i) for i, row in enumerate(MT_PRICES) if row[0] == self.mt_model.get()), "2")
         table.selection_set(current)
         table.focus(current)
         table.pack(fill=BOTH, expand=True, padx=14)
+        asr_frame = ttk.Frame(dialog)
+        asr_frame.pack(fill="x", padx=14, pady=(10, 0))
+        ttk.Label(asr_frame, text="识别引擎（含 qwen-audio-3.1）").pack(anchor="w")
+        asr_table = ttk.Treeview(asr_frame, columns=("engine", "price", "note"), show="headings",
+                                 selectmode="browse", height=len(ASR_PRICES))
+        for column, title, width in (("engine", "识别引擎", 300), ("price", "估算/小时", 120), ("note", "计费", 380)):
+            asr_table.heading(column, text=title)
+            asr_table.column(column, width=width, anchor="w" if column != "price" else "center")
+        for index, (engine, label, price, note) in enumerate(ASR_PRICES):
+            asr_table.insert("", END, iid=f"asr{index}", values=(label, f"{price:.3f}", note))
+        asr_table.pack(fill="x")
         for note in (
-            "统一样本：887 秒音频、12,032 输入 Token、2,008 输出 Token；识别费按 0.00024 元/秒（0.864 元/小时）计。",
+            "统一样本：887 秒音频、9,390 输入 Token、2,008 输出 Token（上下文关闭）；ICL 行按实测 +44% 输入。",
             "小时费用仅供同 Token 比较；通用模型含上下文，实际用量可能更高。未计免费额度、缓存优惠，以阿里云账单为准。",
             "DeepSeek 忙时 08:00–22:00，闲时 22:00–次日 08:00（北京时间）；两行是同一模型，价格自动按时段生效。",
         ):
@@ -677,7 +731,8 @@ class Launcher:
         if getattr(sys, "frozen", False):
             backend = backend_executable_path()
             if not backend.exists():
-                raise RuntimeError(f"后台程序不存在，请重新安装：{backend}")
+                searched = "\n".join(f"  - {path}" for path in backend_executable_candidates())
+                raise RuntimeError(f"后台程序不存在，请重新安装。已查找：\n{searched}")
             command_prefix = [str(backend)]
         else:
             script = runtime_script_path()
@@ -689,7 +744,7 @@ class Launcher:
         source_language = self.source_language.get() or "auto"
         asr_engine = self.asr_engine.get() or "qwen3.5-live"
         edge_tab_audio = self.audio_device.get() == EDGE_TAB_LABEL
-        cloud_engines = {"qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt"}
+        cloud_engines = {"qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen-audio-stream"}
         if edge_tab_audio and asr_engine not in cloud_engines:
             asr_engine = "qwen3.5-live"
             self.asr_engine.set(asr_engine)
@@ -783,22 +838,35 @@ class Launcher:
         cmd.append("--visual-input" if self.visual_enabled.get() and asr_engine != "paraformer-mt" else "--no-visual-input")
         if not self.translate_enabled.get():
             cmd.extend(["--translation-engine", "none"])
-        if asr_engine == "paraformer-mt":
-            cmd.extend(["--mt-model", self.mt_model.get() or "qwen-mt-plus"])
+        if asr_engine in {"paraformer-mt", "qwen3.1-audio"}:
+            mode = "icl" if self.icl_enabled.get() else "force"
+            cmd.extend(["--mt-model", self.mt_model.get() or "qwen3.8-max", "--mt-mode", mode])
+            cards = hotwords.builtin_cards_path()
+            if mode == "icl" and cards.exists():
+                cmd.extend(["--hotword-cards", str(cards)])
         external_hotwords = self.hotwords.get().strip()
         if external_hotwords:
             resolved = Path(external_hotwords).expanduser().resolve()
-            hotwords.load(resolved)
+            custom = hotwords.load(resolved)
             cmd.extend(["--hotwords", str(resolved)])
-        elif asr_engine in {"paraformer-mt", "qwen3.5-live", "qwen3.8-live", "gummy"}:
+            self.add_log(f"热词表：外部 {resolved}（{len(custom.pairs)} 条译名 / "
+                         f"{len(custom.asr_terms())} 条识别词）")
+        elif asr_engine in {"paraformer-mt", "qwen3.1-audio", "qwen3.5-live", "qwen3.8-live", "gummy"}:
             if self.hotwords_path.exists():
                 memory = load_memory(self.hotwords_path)
                 if memory["enabled"] and (memory["terms"] or memory["use_builtin"]):
                     cmd.extend(["--hotwords-file", str(self.hotwords_path)])
+                    merged = hotwords.load(self.hotwords_path)
+                    self.add_log(f"热词表：界面记忆 {self.hotwords_path}（{len(merged.pairs)} 条译名 / "
+                                 f"{len(merged.asr_terms())} 条识别词）")
             else:
                 default_path = hotwords.builtin_path()
-                hotwords.load(default_path)
+                builtin = hotwords.load(default_path)
                 cmd.extend(["--hotwords", str(default_path)])
+                self.add_log(
+                    f"热词表：内置 {default_path}（{len(builtin.pairs)} 条译名 / "
+                    f"{len(builtin.asr_terms())} 条识别词）"
+                )
         return cmd
 
     def audio_test_command(self) -> list[str]:

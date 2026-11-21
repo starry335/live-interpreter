@@ -12,7 +12,10 @@ a = Analysis(
     ['live_interpreter_launcher.py'],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[(str(ROOT / 'hotwords' / 'yumemita_bangdream.txt'), 'hotwords')],
+    datas=[
+        (str(ROOT / 'hotwords' / 'yumemita_bangdream.txt'), 'hotwords'),
+        (str(ROOT / 'hotwords' / 'name_cards.json'), 'hotwords'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
