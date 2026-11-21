@@ -726,7 +726,13 @@ def compose_live_subtitles(
     ]
     while len("\n".join(translated_parts)) > maximum_chars and len(translated_parts) > minimum_events:
         translated_parts.pop(0)
-    translated = "\n".join(translated_parts)
+    # Short consecutive lines read like broken sentences on screen.  Merge
+    # them into one line; the first part still appears immediately and later
+    # short parts are appended in place.
+    if len(translated_parts) >= 2 and all(len(part) <= 12 for part in translated_parts):
+        translated = "，".join(translated_parts)
+    else:
+        translated = "\n".join(translated_parts)
     source = "\n".join(source_parts)
     if not translated and source:
         return source, ""
