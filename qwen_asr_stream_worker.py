@@ -121,6 +121,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Translate a long unfinished sentence provisionally, then replace it with the final translation.")
     parser.add_argument("--draft-after", type=float, default=4.0,
                         help="Start a draft after the sentence has been open this many seconds.")
+    parser.add_argument("--draft-after-chars", type=int, default=0,
+                        help="Also start a draft once the partial reaches this many characters (0 disables).")
     parser.add_argument("--draft-interval", type=float, default=1.2,
                         help="Minimum seconds between drafts for one sentence.")
     parser.add_argument("--draft-min-chars", type=int, default=12,
@@ -276,6 +278,7 @@ class QwenASRStreamConnection(GummyConnection):
             "stream_translation": bool(getattr(self.args, "stream_translation", True)),
             "draft_translation": bool(getattr(self.args, "draft_translation", True)),
             "draft_after": getattr(self.args, "draft_after", 0),
+            "draft_after_chars": getattr(self.args, "draft_after_chars", 0),
             "hotwords": self.hotword_config.summary() if self.hotword_config else None,
         })
 
@@ -590,7 +593,9 @@ class QwenASRStreamConnection(GummyConnection):
             state = {"first": now, "last_text": "", "last_at": 0.0, "count": 0}
             self.draft_state[sentence_id] = state
         if now - float(state["first"]) < float(getattr(self.args, "draft_after", 1.8)):
-            return
+            after_chars = int(getattr(self.args, "draft_after_chars", 0))
+            if after_chars <= 0 or len(text) < after_chars:
+                return
         if len(text) < int(getattr(self.args, "draft_min_chars", 12)):
             return
         if int(state["count"]) >= int(getattr(self.args, "draft_max", 2)):
