@@ -48,6 +48,8 @@ class HotwordFileTests(unittest.TestCase):
         self.assertNotIn("戦国ユーノ", config.asr_terms())
         self.assertEqual(config.postprocess("战国由乃和拉卡马奇奥尔雷"), "由乃和阿拉蕾")
         self.assertEqual(config.postprocess("正常文本"), "正常文本")
+        self.assertEqual(config.postprocess("都酱来了"), "都子酱来了")
+        self.assertEqual(config.postprocess("みやこ酱来了"), "都子酱来了")
 
     def test_sections_and_derived_forbidden_target(self):
         path = self.write(
@@ -58,6 +60,35 @@ class HotwordFileTests(unittest.TestCase):
         config = hotwords.load(path)
         self.assertEqual(config.asr_terms(), ["千石ユノ", "ユノ"])
         self.assertEqual([(t.source, t.target) for t in config.forbidden], [("战国由乃", "由乃")])
+
+    def test_asr_replace_uses_only_listed_surfaces(self):
+        path = self.write(
+            "asr_replace.txt",
+            "[hotwords]\nあられ => 阿拉蕾\n峰月律 => 律\n[asr-replace]\nアラレ\n峰月律\n",
+        )
+        config = hotwords.load(path)
+        self.assertTrue(config.asr_replace)
+        self.assertEqual(config.asr_terms(), ["アラレ", "峰月律"])
+        self.assertEqual([t.source for t in config.mt_terms()], ["あられ", "峰月律"])
+
+    def test_context_section_is_kept_for_asr(self):
+        path = self.write(
+            "context.txt",
+            "[hotwords]\nヒロ => 希罗\n[context]\n作品『X』の登場人物: ヒロ(ヒロちゃん)。\n",
+        )
+        config = hotwords.load(path)
+        self.assertIn("ヒロ(ヒロちゃん)", config.context)
+        self.assertEqual(config.summary()["context_chars"], len(config.context))
+
+    def test_asr_warm_terms_get_weight_one(self):
+        path = self.write(
+            "warm.txt",
+            "[hotwords]\nあられ => 阿拉蕾\n[asr-warm]\nひろ\n",
+        )
+        config = hotwords.load(path)
+        weights = config.asr_weights(5)
+        self.assertEqual(weights["あられ"], 5)
+        self.assertEqual(weights["ひろ"], 1)
 
     def test_duplicate_source_keeps_first_and_warns(self):
         path = self.write("dup.txt", "あられ => 阿拉蕾\nあられ => 亚蕾\n")
@@ -123,10 +154,11 @@ class HotwordFileTests(unittest.TestCase):
         self.assertEqual(config.warnings, [])
         self.assertIn("あられ", config.asr_terms())
         self.assertIn("ゆのち", config.asr_terms())
-        self.assertNotIn("戦国ユーノ", config.asr_terms())
-        self.assertIn("戦国ユーノ", [term.source for term in config.mt_terms()])
-        self.assertIn("ラカマチオルレ", [term.source for term in config.mt_terms()])
-        self.assertEqual(config.postprocess("我是战国由乃"), "我是由乃")
+        self.assertEqual(config.aliases, [])
+        self.assertEqual(config.forbidden, [])
+        self.assertLessEqual(len(config.mt_terms()), 200)
+        self.assertLessEqual(len(config.asr_terms()), 500)
+        self.assertIn("野乃酱", config.translation_phrases().values())
         # A Chinese target must not leave Japanese kana in the subtitle. This
         # caught the offline kb_terms typo "のの酱".
         kana = re.compile(r"[ぁ-ゖァ-ヺ]")
@@ -160,9 +192,8 @@ class HotwordFileTests(unittest.TestCase):
         config = hotwords.load(path)
         self.assertEqual(config.translation_phrases()["あられ"], "自定义阿拉蕾")
         self.assertEqual(config.translation_phrases()["山田リョウ"], "山田凉")
-        self.assertIn("戦国ユーノ", config.translation_phrases())
+        self.assertIn("ゆのち", config.translation_phrases())
         self.assertNotIn("戦国ユーノ", config.asr_terms())
-        self.assertEqual(config.postprocess("我是战国由乃"), "我是由乃")
 
     def test_builtin_can_be_disabled_without_losing_custom_terms(self):
         path = self.write("memory.json", json.dumps({

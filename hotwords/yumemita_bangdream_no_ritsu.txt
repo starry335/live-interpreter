@@ -1,0 +1,235 @@
+戦国ゆの => 千石由乃
+戦国ゆのさん => 千石由乃
+戦国ゆのちゃん => 千石由乃
+戦国由乃 => 千石由乃
+千石ゆの => 千石由乃
+千石ゆのさん => 千石由乃
+戦国ユノ => 千石由乃
+戦国ユーノ => 千石由乃
+
+# 梦限大 MewType / BanG Dream! 人名热词（v0.2 读音表 + 领域词）
+# 格式：日文写法 => 中文译名；不含错误形态别名与禁转规则。
+
+あられ => 阿拉蕾
+アラレ => 阿拉蕾
+仲町あられ => 阿拉蕾
+あられちゃん => 阿拉蕾酱
+アラレちゃん => 阿拉蕾酱
+ののか => 野乃花
+ノノカ => 野乃花
+宮永ののか => 野乃花
+国王 => 国王
+ののちゃん => 野乃酱
+ののちん => 野乃花
+ののたん => 野乃花
+ののさん => 野乃花
+のんちゃん => 野乃花
+ノンちゃん => 野乃花
+のーちゃん => 野乃花
+ノーちゃん => 野乃花
+峰月律 => 律
+みやこ => 都子
+ミヤコ => 都子
+都子 => 都子
+藤都子 => 都子
+みゃーこ => 都子
+ミャーコ => 都子
+みゃー => 都子
+みゃこ => 都子
+ミャコ => 都子
+みやこちゃん => 都子酱
+ミヤコちゃん => 都子酱
+都子ちゃん => 都子酱
+みやこさん => 都子
+ミヤコさん => 都子
+都子さん => 都子
+みやこせんせい => 都子老师
+ミヤコせんせい => 都子老师
+都子せんせい => 都子老师
+みゃーこちゃん => 都子酱
+ミャーコちゃん => 都子酱
+みゃーこさん => 都子
+ミャーコさん => 都子
+ゆの => 由乃
+ユノ => 由乃
+千石ユノ => 千石由乃
+千石ユーノ => 千石由乃
+ゆのち => 由乃亲
+ユノち => 由乃亲
+ゆのっち => 由乃亲
+ユノっち => 由乃亲
+ゆのちゃん => 由乃酱
+ユノちゃん => 由乃酱
+ゆのさん => 由乃
+ユノさん => 由乃
+ポッピンパーティ => Poppin'Party
+ポッピンパーティー => Poppin'Party
+ポッピン・パーティ => Poppin'Party
+Poppin'Party => Poppin'Party
+Poppin Party => Poppin'Party
+ポピパ => Popipa
+Popipa => Popipa
+アフターグロウ => Afterglow
+アフターグロー => Afterglow
+アフタグロウ => Afterglow
+Afterglow => Afterglow
+パステルパレット => Pastel*Palettes
+パステル・パレット => Pastel*Palettes
+Pastel*Palettes => Pastel*Palettes
+Pastel Palettes => Pastel*Palettes
+パスパレ => Pasupare
+PasuPare => Pasupare
+Pasupare => Pasupare
+ロゼリア => Roselia
+ロゼリヤ => Roselia
+Roselia => Roselia
+ハローハッピーワールド => Hello, Happy World!
+ハロー・ハッピー・ワールド => Hello, Happy World!
+Hello, Happy World! => Hello, Happy World!
+Hello Happy World => Hello, Happy World!
+ハロハピ => HaroHapi
+HaroHapi => HaroHapi
+モルフォニカ => Morfonica
+Morfonica => Morfonica
+レイズアスイレン => RAISE A SUILEN
+レイズ・ア・スイレン => RAISE A SUILEN
+RAISE A SUILEN => RAISE A SUILEN
+レイズ => RAISE A SUILEN
+RAS => RAISE A SUILEN
+マイゴー => MyGO!!!!!
+MyGO!!!!! => MyGO!!!!!
+MyGO => MyGO!!!!!
+マイゴ => MyGO!!!!!
+アヴェムジカ => Ave Mujica
+アヴェ・ムジカ => Ave Mujica
+Ave Mujica => Ave Mujica
+AveMujica => Ave Mujica
+アベムジカ => Ave Mujica
+アムジカ => Ave Mujica
+夢限大 => 梦限大
+無限大 => 梦限大
+ムゲンダイ => 梦限大
+ミュータイプ => MewType
+みゅーたいぷ => MewType
+MewType => MewType
+ゆめみた => 梦限大
+夢見た => 梦限大
+ゆめみたー => 梦限大
+夢限大みゅーたいぷ => 梦限大MewType
+無限大ミュータイプ => 梦限大MewType
+夢限大ミュータイプ => 梦限大MewType
+無限大宮タイプ => 梦限大MewType
+Mugendai MewType => 梦限大MewType
+夢限大MewType => 梦限大MewType
+ミルセージ => millsage
+ミルセイジ => millsage
+millsage => millsage
+Millsage => millsage
+一家ダムロック => 一家Dumb Rock!
+いっかダムロック => 一家Dumb Rock!
+一家Dumb Rock! => 一家Dumb Rock!
+一家DumbRock => 一家Dumb Rock!
+ダムロック => 一家Dumb Rock!
+Dumb Rock => 一家Dumb Rock!
+Arale => 阿拉蕾
+arl => 阿拉蕾
+Nonoka => 野乃花
+Ritsu => 律
+Miyako => 都子
+Yuno => 由乃
+Kohaku => Kohaku
+Gradient => Gradient
+Tuning => Tuning
+Angel Beats! => Angel Beats!
+Girls Dead Monster => Girls Dead Monster
+VALORANT => VALORANT
+スーパーバニーマン => Super Bunny Man
+Super Bunny Man => Super Bunny Man
+バンドリ => BanG Dream!
+BanG Dream! => BanG Dream!
+野乃花王国 => 野乃花王国
+羊羹寿司 => 羊羹寿司
+ポンコツ食いしん坊太陽神リー => 废柴吃货太阳神律
+废柴吃货太阳神律 => 废柴吃货太阳神律
+肩宽210 => 肩宽210
+永远16岁 => 永远16岁
+フィットボクシング => 健身拳击
+Fitness Boxing => 健身拳击
+ゲッペイ => 月饼
+げっぺい => 月饼
+月餅 => 月饼
+メロンパン => 蜜瓜包
+マカロン => 马卡龙
+八橋 => 八桥
+木谷社長 => 木谷社长
+闇タイプ => 恶属性
+闇属性 => 恶属性
+暗属性 => 恶属性
+あくタイプ => 恶属性
+あく属性 => 恶属性
+悪タイプ => 恶属性
+ダークタイプ => 恶属性
+ゴーストタイプ => 幽灵属性
+ゴースト系 => 幽灵系
+ヴィオラ => 薇欧拉
+ビオラ => 薇欧拉
+Viola => 薇欧拉
+
+Mujica => Mujica
+mujica => Mujica
+ムジカ => Mujica
+豊川祥子 => 祥子
+祥子 => 祥子
+さきこ => 祥子
+サキコ => 祥子
+若葉睦 => 睦
+睦 => 睦
+むつみ => 睦
+ムツミ => 睦
+三角初華 => 初华
+初華 => 初华
+ういか => 初华
+ウイカ => 初华
+八幡海鈴 => 海铃
+海鈴 => 海铃
+うみり => 海铃
+ウミリ => 海铃
+祐天寺にゃむ => 喵梦
+にゃむ => 喵梦
+ニャム => 喵梦
+高松燈 => 灯
+燈 => 灯
+ともり => 灯
+トモリ => 灯
+椎名立希 => 立希
+立希 => 立希
+たき => 立希
+タキ => 立希
+長崎そよ => 素世
+そよ => 素世
+ソヨ => 素世
+
+
+[aliases]
+のちゃん => 野乃花
+ノちゃん => 野乃花
+
+[asr-warm]
+tomirin
+トモリン
+ともりん
+のちゃん
+ひろ
+ヒロ
+ヒロちゃん
+ママまち
+パパまち
+弟まち
+ぽんちゃん
+
+
+[forbidden]
+战国由乃 => 千石由乃
+千国由乃 => 千石由乃
+战国先生 => 千石先生
+战国绘 => 千石绘
