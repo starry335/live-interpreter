@@ -73,6 +73,7 @@ NAMES: Tuple[WarmName, ...] = (
     WarmName(("Oblivionis", "オブリビオニス"), "Oblivionis"),
     # MyGO!!!!!
     WarmName(("ともり", "トモリ"), "灯"),
+    WarmName(("ともりん", "トモリン", "tomirin"), "小灯"),
     WarmName(("あのん", "アノン"), "爱音"),
     WarmName(("らな", "ラナ"), "乐奈"),
     WarmName(("そよ", "ソヨ"), "素世"),
