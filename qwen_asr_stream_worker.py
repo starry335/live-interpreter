@@ -121,7 +121,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Translate a long unfinished sentence provisionally, then replace it with the final translation.")
     parser.add_argument("--draft-after", type=float, default=4.0,
                         help="Start a draft after the sentence has been open this many seconds.")
-    parser.add_argument("--draft-after-chars", type=int, default=0,
+    parser.add_argument("--draft-after-chars", type=int, default=16,
                         help="Also start a draft once the partial reaches this many characters (0 disables).")
     parser.add_argument("--draft-interval", type=float, default=1.2,
                         help="Minimum seconds between drafts for one sentence.")
