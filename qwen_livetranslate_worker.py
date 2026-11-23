@@ -12,6 +12,7 @@ import uuid
 from typing import Dict, List, Optional
 
 import hotwords
+import runtime_safety
 
 
 MODEL = "qwen3.5-livetranslate-flash-realtime"
@@ -23,7 +24,7 @@ REGION_HOSTS = {
 
 
 def emit(payload: Dict[str, object]) -> None:
-    print(json.dumps(payload, ensure_ascii=True), flush=True)
+    runtime_safety.write_json(payload)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -35,6 +36,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--workspace-id", default=os.environ.get("DASHSCOPE_WORKSPACE_ID", ""))
     parser.add_argument("--region", choices=sorted(REGION_HOSTS), default="beijing")
     parser.add_argument("--visual-file", default="")
+    parser.add_argument("--public-endpoint", action="store_true",
+                        help="Use dashscope.aliyuncs.com when no Workspace ID is configured.")
     parser.add_argument("--hotwords", "--hotwords-file", dest="hotwords", default="", help="Hotword glossary file (.txt or JSON).")
     return parser.parse_args(argv)
 
@@ -55,7 +58,11 @@ def image_event(data: bytes) -> Dict[str, object]:
 
 
 def translation_config(args: argparse.Namespace) -> Dict[str, object]:
-    translation: Dict[str, object] = {"language": args.target_language}
+    alias = {"chinese": "zh", "japanese": "ja", "english": "en", "korean": "ko", "cantonese": "yue",
+             "zh-cn": "zh", "zh-tw": "zh"}
+    language = str(args.target_language or "zh").strip()
+    language = alias.get(language.lower(), language)
+    translation: Dict[str, object] = {"language": language}
     config = getattr(args, "hotword_config", None)
     if config is None and args.hotwords:
         config = hotwords.load(args.hotwords)
@@ -100,6 +107,8 @@ class ResultNormalizer:
         self.item_sentences: Dict[str, str] = {}
         self.source_text: Dict[str, str] = {}
         self.translation_text: Dict[str, str] = {}
+        self.pending_completed = False
+        self.last_source_sentence = ""
 
     def _new_sentence(self) -> str:
         self.sequence += 1
@@ -129,14 +138,29 @@ class ResultNormalizer:
 
         if event_type.startswith("conversation.item.input_audio_transcription."):
             item_id = str(message.get("item_id") or "")
-            sentence_id = self.item_sentences.setdefault(item_id, self._current())
+            completed = event_type.endswith(".completed")
+            sentence_id = self.item_sentences.get(item_id) if item_id else None
+            if sentence_id is None:
+                sentence_id = self._new_sentence()
+                if item_id:
+                    self.item_sentences[item_id] = sentence_id
+            elif item_id and self.pending_completed and not completed:
+                # the provider reuses one item id for the whole session (qwen3.8);
+                # a delta after a completed transcript starts the next sentence.
+                sentence_id = self._new_sentence()
+                self.item_sentences[item_id] = sentence_id
+                self.pending_completed = False
             if event_type.endswith(".delta"):
                 text = self.source_text.get(item_id, "") + str(message.get("delta") or "")
                 self.source_text[item_id] = text
             else:
                 text = event_text(message)
-            if event_type.endswith(".completed"):
+            if completed:
                 self.source_text.pop(item_id, None)
+                self.last_source_sentence = sentence_id
+                self.pending_completed = True
+            elif self.pending_completed and sentence_id == self.item_sentences.get(item_id):
+                pass
             if not text:
                 return []
             return [
@@ -144,7 +168,7 @@ class ResultNormalizer:
                     "event": "result",
                     "sentence_id": sentence_id,
                     "source": text,
-                    "source_final": event_type.endswith(".completed"),
+                    "source_final": completed,
                 }
             ]
 
@@ -159,7 +183,10 @@ class ResultNormalizer:
         if event_type in {"response.text.text", "response.text.delta", "response.text.done"}:
             response_id = str(message.get("response_id") or "")
             item_id = str(message.get("item_id") or "")
-            sentence_id = self.item_sentences.get(item_id) or self.response_sentences.setdefault(response_id, self._current())
+            sentence_id = self.item_sentences.get(item_id) if item_id else None
+            if sentence_id is None:
+                sentence_id = self.last_source_sentence or self.response_sentences.setdefault(
+                    response_id, self._current())
             text_key = item_id or response_id
             if event_type.endswith(".delta"):
                 text = self.translation_text.get(text_key, "") + str(message.get("delta") or "")
@@ -206,14 +233,20 @@ class QwenLiveConnection:
         self.hotword_config = getattr(args, "hotword_config", None)
         self.send_lock = threading.Lock()
         self.audio_started = threading.Event()
+        self.audio_seconds = 0.0
+        self.sentence_begin: Dict[str, int] = {}
 
     def open(self) -> None:
         config = session_config(self.args)
         workspace_id = self.args.workspace_id.strip()
-        if not workspace_id:
-            raise RuntimeError("Missing Alibaba Cloud Workspace ID.")
         host = REGION_HOSTS[self.args.region]
-        url = f"wss://{workspace_id}.{host}/api-ws/v1/realtime?model={self.args.model}"
+        if workspace_id:
+            url = f"wss://{workspace_id}.{host}/api-ws/v1/realtime?model={self.args.model}"
+        elif getattr(self.args, "public_endpoint", False):
+            # The public Model Studio endpoint accepts this model without a workspace id.
+            url = f"wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model={self.args.model}"
+        else:
+            raise RuntimeError("Missing Alibaba Cloud Workspace ID.")
         self.ws = self.websocket.create_connection(
             url,
             header=[
@@ -311,7 +344,18 @@ class QwenLiveConnection:
                         payload["translation"] = self.hotword_config.postprocess(
                             str(payload["translation"])
                         )
+                    self._stamp(payload)
                     emit(payload)
+
+    def _stamp(self, payload: Dict[str, object]) -> None:
+        """Attach client-side audio positions; this model returns no timestamps."""
+        sentence_id = str(payload.get("sentence_id") or "")
+        if not sentence_id or payload.get("event") != "result":
+            return
+        position = round(self.audio_seconds * 1000)
+        self.sentence_begin.setdefault(sentence_id, position)
+        payload["begin_time"] = self.sentence_begin[sentence_id]
+        payload["end_time"] = position if payload.get("source_final") or payload.get("translation_final") else None
 
     def _fail(self, message: str, code: str = "") -> None:
         self.error = message
@@ -323,6 +367,7 @@ class QwenLiveConnection:
     def send_audio(self, data: bytes) -> None:
         if self.failed.is_set() or self.finished.is_set():
             raise RuntimeError(self.error or "Qwen realtime session failed.")
+        self.audio_seconds += len(data) / 32000
         self._send(
             {
                 "event_id": uuid.uuid4().hex,
@@ -350,6 +395,7 @@ class QwenLiveConnection:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    runtime_safety.install("qwen-live", os.environ.get("LIVE_INTERPRETER_WORK_DIR", ""))
     args.hotword_config = None
     if str(getattr(args, "hotwords", "")).strip():
         try:
@@ -384,4 +430,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(runtime_safety.guard("qwen-live", main))

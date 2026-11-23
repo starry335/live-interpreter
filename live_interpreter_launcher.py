@@ -20,6 +20,7 @@ from tkinter import ttk
 from hotword_memory import load_memory, parse_hotwords, save_memory
 import hotwords
 import launcher_settings
+import runtime_safety
 
 
 APP_VERSION = "0.3.2"
@@ -43,6 +44,9 @@ LOOPBACK_DEVICE = "__wasapi_loopback__"
 EDGE_TAB_LABEL = "Edge 当前标签页 (浏览器扩展)"
 EDGE_TAB_DEVICE = "__edge_tab_audio__"
 OVERLAY_MODES = {"桌面透明悬浮窗": "desktop", "直播透明窗口（免抠像）": "alpha"}
+# One source of truth for engines that can drive the cloud backend.
+CLOUD_ENGINES = {"qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen3.1-audio"}
+LOCAL_ENGINES = {"sensevoice", "streaming"}
 MODEL_PRICING_URL = "https://help.aliyun.com/zh/model-studio/model-pricing"
 # Beijing standard prices (CNY / million text tokens), checked 2026-10-25.
 # (model, label, input_price, output_price, input_tokens, output_tokens)
@@ -261,7 +265,7 @@ class Launcher:
         self.target_language = StringVar(value="Chinese")
         self.asr_engine = StringVar(value=os.environ.get("LIVE_INTERPRETER_ASR_ENGINE", "paraformer-mt"))
         self.mt_model = StringVar(value=os.environ.get("LIVE_INTERPRETER_MT_MODEL", "qwen3.8-max"))
-        self.icl_enabled = BooleanVar(value=True)
+        self.icl_enabled = BooleanVar(value=False)
         self.aliyun_api_key = StringVar(value=os.environ.get("DASHSCOPE_API_KEY", ""))
         self.aliyun_workspace_id = StringVar(
             value=os.environ.get("DASHSCOPE_WORKSPACE_ID", "")
@@ -595,13 +599,16 @@ class Launcher:
     def update_model_controls(self, event=None) -> None:
         is_qwen38 = self.asr_engine.get() == "qwen3.8-live"
         is_paraformer_mt = self.asr_engine.get() == "paraformer-mt"
+        is_qwen_asr = self.asr_engine.get() == "qwen3.1-audio"
         if is_paraformer_mt:
             self.aliyun_region.set("beijing")
+            self.visual_enabled.set(False)
+        if is_qwen_asr:
             self.visual_enabled.set(False)
         if self.asr_engine.get() == "qwen3.1-audio" and str(self.gummy_max_end_silence.get()).strip() == "500":
             # 3.1 builds longer segments; 300 ms keeps subtitle latency close to Paraformer.
             self.gummy_max_end_silence.set("300")
-        self.visual_button.configure(state="disabled" if is_paraformer_mt else "normal")
+        self.visual_button.configure(state="disabled" if is_paraformer_mt or is_qwen_asr else "normal")
         is_text_mt = self.asr_engine.get() in {"paraformer-mt", "qwen3.1-audio"}
         self.mt_combo.configure(state="readonly" if is_text_mt else "disabled")
         if hasattr(self, "icl_check"):
@@ -742,13 +749,12 @@ class Launcher:
                 raise RuntimeError(f"live_interpreter.py not found: {script}")
             command_prefix = [str(ENV_PYTHON), str(script)]
         source_language = self.source_language.get() or "auto"
-        asr_engine = self.asr_engine.get() or "qwen3.5-live"
+        asr_engine = self.asr_engine.get() or "paraformer-mt"
         edge_tab_audio = self.audio_device.get() == EDGE_TAB_LABEL
-        cloud_engines = {"qwen3.5-live", "qwen3.8-live", "gummy", "paraformer-mt", "qwen-audio-stream"}
-        if edge_tab_audio and asr_engine not in cloud_engines:
-            asr_engine = "qwen3.5-live"
-            self.asr_engine.set(asr_engine)
-            self.add_log("Edge 标签页音频使用云端实时翻译，已自动切换到 Qwen3.5。")
+        if edge_tab_audio and asr_engine not in CLOUD_ENGINES:
+            raise RuntimeError(
+                "Edge 标签页音频需要云端实时引擎，请选择 Paraformer、Qwen3.1 或 Qwen LiveTranslate。"
+            )
         if asr_engine == "qwen3.8-live":
             source_language = "auto"
         if asr_engine == "streaming" and source_language not in ("zh", "cn", "Chinese", "chinese"):
@@ -835,11 +841,11 @@ class Launcher:
             cmd.append("--overlay-hide-source")
         if self.record_screen.get():
             cmd.append("--record-screen")
-        cmd.append("--visual-input" if self.visual_enabled.get() and asr_engine != "paraformer-mt" else "--no-visual-input")
+        cmd.append("--visual-input" if self.visual_enabled.get() and asr_engine not in {"paraformer-mt", "qwen3.1-audio"} else "--no-visual-input")
         if not self.translate_enabled.get():
             cmd.extend(["--translation-engine", "none"])
         if asr_engine in {"paraformer-mt", "qwen3.1-audio"}:
-            mode = "icl" if self.icl_enabled.get() else "force"
+            mode = "icl" if self.icl_enabled.get() else "reference"
             cmd.extend(["--mt-model", self.mt_model.get() or "qwen3.8-max", "--mt-mode", mode])
             cards = hotwords.builtin_cards_path()
             if mode == "icl" and cards.exists():
@@ -959,14 +965,15 @@ class Launcher:
             messagebox.showwarning(APP_TITLE, "请先选择音频设备。")
             return False
         selected_engine = self.asr_engine.get()
-        if self.audio_device.get() == EDGE_TAB_LABEL and selected_engine not in {
-            "gummy",
-            "qwen3.5-live",
-            "qwen3.8-live",
-            "paraformer-mt",
-        }:
-            selected_engine = "qwen3.5-live"
-        if selected_engine in {"gummy", "qwen3.5-live", "qwen3.8-live", "paraformer-mt"} and not self.aliyun_api_key.get().strip():
+        if self.audio_device.get() == EDGE_TAB_LABEL and selected_engine not in CLOUD_ENGINES:
+            messagebox.showwarning(
+                APP_TITLE,
+                "Edge 标签页音频需要云端实时引擎。\n请选择 Paraformer、Qwen3.1 或 Qwen LiveTranslate，"
+                "程序不会偷偷切换你的引擎。",
+            )
+            return False
+        if selected_engine in {"gummy", "qwen3.5-live", "qwen3.8-live", "paraformer-mt",
+                               "qwen3.1-audio"} and not self.aliyun_api_key.get().strip():
             messagebox.showwarning(APP_TITLE, "请先填写阿里云百炼 API Key。")
             return False
         if selected_engine == "paraformer-mt" and self.aliyun_region.get() != "beijing":
@@ -1027,6 +1034,11 @@ class Launcher:
             return False
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
+        self.add_log(
+            f"实际配置：ASR={self.asr_engine.get()} / MT={self.mt_model.get()} / "
+            f"断句={self.gummy_max_end_silence.get()}ms / "
+            f"热词={self.hotwords.get().strip() or '内置或记忆词表'}"
+        )
         if self.asr_engine.get() in {"qwen3.5-live", "qwen3.8-live"}:
             model_name = self.asr_engine.get().replace("qwen", "Qwen").replace("-live", " LiveTranslate")
             self.add_log(f"已启动同传，正在连接 {model_name}（仅文本）...")
@@ -1081,7 +1093,9 @@ class Launcher:
         if not proc:
             return
         code = proc.wait()
-        self.log_queue.put(f"进程已退出，代码 {code}")
+        self.log_queue.put(
+            f"进程已退出：{runtime_safety.describe_exit_code(code)}（代码 {code}）"
+        )
         self.root.after(0, self.set_stopped)
 
     def drain_logs(self) -> None:

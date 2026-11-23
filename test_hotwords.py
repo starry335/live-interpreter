@@ -149,16 +149,19 @@ class HotwordFileTests(unittest.TestCase):
         self.assertTrue(block.startswith("Terminology"))
 
     def test_repository_example_keeps_short_names_and_skips_asr_miswrites(self):
-        path = Path(__file__).resolve().parent / "hotwords" / "yumemita_bangdream.txt"
+        path = hotwords.builtin_path()
         config = hotwords.load(path)
         self.assertEqual(config.warnings, [])
         self.assertIn("あられ", config.asr_terms())
         self.assertIn("ゆのち", config.asr_terms())
-        self.assertEqual(config.aliases, [])
-        self.assertEqual(config.forbidden, [])
+        self.assertTrue(config.aliases)
+        self.assertTrue(config.forbidden)
         self.assertLessEqual(len(config.mt_terms()), 200)
         self.assertLessEqual(len(config.asr_terms()), 500)
         self.assertIn("野乃酱", config.translation_phrases().values())
+        # Precision-first default: no bare そよ/たき/ともり injection.
+        self.assertNotIn("そよ", [term.source for term in config.mt_terms()])
+        self.assertNotIn("たき", [term.source for term in config.mt_terms()])
         # A Chinese target must not leave Japanese kana in the subtitle. This
         # caught the offline kb_terms typo "のの酱".
         kana = re.compile(r"[ぁ-ゖァ-ヺ]")

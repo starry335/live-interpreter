@@ -12,11 +12,11 @@ def event(index: int, finalized_at: float) -> dict:
 
 events = [event(index, 100.0 + index) for index in range(6)]
 text, source = compose_live_subtitles(events, 3, 6, 8.0, 800, now=107.0)
-assert text.splitlines() == [f"translation {index}" for index in range(6)]
+assert text.splitlines() == ["，".join(f"translation {index}" for index in range(6))]
 assert source.splitlines() == ["source 4", "source 5"]
 
 text, source = compose_live_subtitles(events, 3, 6, 8.0, 800, now=120.0)
-assert text.splitlines() == ["translation 3", "translation 4", "translation 5"]
+assert text.splitlines() == ["，".join(f"translation {index}" for index in range(3, 6))]
 assert source.splitlines() == ["source 4", "source 5"]
 print("overlay subtitle retention: ok")
 

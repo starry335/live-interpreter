@@ -64,10 +64,10 @@ process.stdout.write(JSON.stringify(snapshots.map(snapshot => select(snapshot, 1
                 "live_interpreter.run_cloud_session", side_effect=lambda *unused: stop.set()
             ) as session:
                 cloud_stream_loop(args, State(), stop, {"proc": None}, {"proc": None}, BrowserAudioInput())
-            command = session.call_args.args[6]
+            command = session.call_args.args[7]
             self.assertEqual(command[command.index("--model") + 1], "qwen3.8-livetranslate-flash-realtime")
             self.assertEqual(command[command.index("--visual-file") + 1], str(Path(directory) / "visual_frame.jpg"))
-            self.assertEqual(session.call_args.args[7], "Qwen3.8 LiveTranslate")
+            self.assertEqual(session.call_args.args[8], "Qwen3.8 LiveTranslate")
 
     def test_backoff_is_capped(self):
         self.assertEqual([cloud_retry_delay(n) for n in range(1, 9)], [1, 2, 4, 8, 16, 30, 30, 30])

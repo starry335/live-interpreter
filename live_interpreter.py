@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Tuple
 
 import hotwords
+import runtime_safety
 
 
 ROOT = Path(__file__).resolve().parent
@@ -650,6 +651,85 @@ class BrowserAudioInput:
             return b""
 
 
+class PcmStream:
+    """Long-lived 16 kHz PCM source that survives cloud-worker reconnects.
+
+    A reader thread drains the capture process into a bounded queue.  When the
+    worker restarts, the queue still holds the last few seconds of speech, so a
+    reconnect does not silently drop the sentence being spoken.
+    """
+
+    def __init__(self, audio_device: str, max_frames: int = 50) -> None:
+        self.audio_device = audio_device
+        self.frames: "queue.Queue[bytes]" = queue.Queue(maxsize=max(5, int(max_frames)))
+        self.proc: Optional[subprocess.Popen] = None
+        self.reader: Optional[threading.Thread] = None
+        self.stderr_reader: Optional[threading.Thread] = None
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+
+    def start(self) -> None:
+        self.stop_event.clear()
+        self.proc = start_pcm_audio_capture(self.audio_device)
+        self.reader = threading.Thread(target=self._read_loop, args=(self.proc,), daemon=True)
+        self.reader.start()
+        self.stderr_reader = threading.Thread(
+            target=forward_binary_stderr, args=(self.proc, "audio"), daemon=True
+        )
+        self.stderr_reader.start()
+
+    def _read_loop(self, proc: subprocess.Popen) -> None:
+        if not proc.stdout:
+            return
+        try:
+            while not self.stop_event.is_set():
+                frame = proc.stdout.read(3200)
+                if not frame:
+                    break
+                try:
+                    self.frames.put_nowait(frame)
+                except queue.Full:
+                    try:
+                        self.frames.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self.frames.put_nowait(frame)
+                    except queue.Full:
+                        pass
+        finally:
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def read(self, timeout: float = 0.5) -> bytes:
+        try:
+            return self.frames.get(timeout=timeout)
+        except queue.Empty:
+            return b""
+
+    def restart(self) -> None:
+        self.stop()
+        self.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        proc, self.proc = self.proc, None
+        if proc is not None:
+            stop_process(proc, pcm_input=False)
+        if self.reader is not None and self.reader is not threading.current_thread():
+            self.reader.join(timeout=1)
+        if self.stderr_reader is not None and self.stderr_reader is not threading.current_thread():
+            self.stderr_reader.join(timeout=1)
+        self.reader = None
+        self.stderr_reader = None
+
+
 class BrowserVisualInput:
     def __init__(self, path: Path, enabled: bool) -> None:
         self.path = path
@@ -727,12 +807,20 @@ def compose_live_subtitles(
     while len("\n".join(translated_parts)) > maximum_chars and len(translated_parts) > minimum_events:
         translated_parts.pop(0)
     # Short consecutive lines read like broken sentences on screen.  Merge
-    # them into one line; the first part still appears immediately and later
-    # short parts are appended in place.
-    if len(translated_parts) >= 2 and all(len(part) <= 12 for part in translated_parts):
-        translated = "，".join(translated_parts)
+    # fragments into one paragraph until a sentence-ending punctuation mark;
+    # the first part still appears immediately and later parts are appended.
+    if len(translated_parts) >= 2:
+        merged: List[str] = [translated_parts[0]]
+        for part in translated_parts[1:]:
+            if merged[-1].endswith(("。", "！", "？", "!", "?")):
+                merged.append(part)
+            else:
+                merged[-1] = merged[-1].rstrip("，,、 ") + "，" + part
+        translated = "\n".join(merged)
+    elif translated_parts:
+        translated = translated_parts[0]
     else:
-        translated = "\n".join(translated_parts)
+        translated = ""
     source = "\n".join(source_parts)
     if not translated and source:
         return source, ""
@@ -2091,7 +2179,7 @@ def stop_process(proc: Optional[subprocess.Popen], *, pcm_input: bool = False) -
     except Exception:
         pass
     try:
-        proc.wait(timeout=8 if pcm_input else 5)
+        proc.wait(timeout=15 if pcm_input else 5)
     except subprocess.TimeoutExpired:
         proc.terminate()
         try:
@@ -2172,12 +2260,15 @@ def handle_cloud_output(
         line = raw.decode("utf-8", errors="replace").strip()
         if not line:
             continue
+        connection_state["last_output"] = time.monotonic()
         try:
             message = json.loads(line)
         except json.JSONDecodeError:
             print(f"[{engine_name}] {line}", flush=True)
             continue
         event = message.get("event")
+        if event == "heartbeat":
+            continue
         if event == "ready":
             connection_state["ok"] = True
             connection_state["connected_at"] = time.monotonic()
@@ -2232,6 +2323,9 @@ def handle_cloud_output(
             print(f"{engine_name} hotword hit [{message.get('sentence_id')}]: {pairs}", flush=True)
         elif event in {"translation_usage", "usage_summary"}:
             print(f"{engine_name} usage: {json.dumps(message, ensure_ascii=True)}", flush=True)
+        elif event == "translation_failed":
+            print(f"{engine_name} translation failed [{message.get('sentence_id')}]: "
+                  f"{message.get('reason', '')}", file=sys.stderr, flush=True)
         elif event == "warning":
             print(f"{engine_name} warning: {message.get('message', '')}", file=sys.stderr, flush=True)
         elif event in {"error", "fatal_error"}:
@@ -2256,6 +2350,15 @@ def handle_cloud_output(
 
 def cloud_retry_delay(failures: int) -> float:
     return min(30.0, 2.0 ** min(max(0, failures - 1), 5))
+
+
+def check_worker_alive(connection_state: Dict[str, object], proc: subprocess.Popen,
+                       seconds: float = 25.0) -> None:
+    if proc.poll() is not None:
+        return
+    last = float(connection_state.get("last_output") or 0.0)
+    if last and time.monotonic() - last > seconds:
+        raise RuntimeError(f"worker stopped responding for {seconds:g}s (no heartbeat)")
 
 
 def cloud_stream_loop(
@@ -2331,10 +2434,10 @@ def cloud_stream_loop(
         if args.visual_input and args.audio_device == BROWSER_DEVICE:
             command.extend(["--visual-file", str(args.work_dir / "visual_frame.jpg")])
     else:
-        # 3.1's near-field VAD still honours the silence threshold: 200 ms gives
-        # shorter utterances than the 300 ms used for Paraformer. Keep the
-        # user's setting as an upper bound if they chose something smaller.
-        silence = min(200, int(args.gummy_max_end_silence)) if is_qwen_asr else int(args.gummy_max_end_silence)
+        # 3.1 uses the user's end-silence directly: the GUI recommends 300 ms
+        # for the near-field VAD, and silently forcing 200 ms made captions
+        # fragment into one-word lines.
+        silence = int(args.gummy_max_end_silence)
         command.extend(["--max-end-silence", str(silence)])
     if is_paraformer_mt:
         command.extend([
@@ -2359,6 +2462,8 @@ def cloud_stream_loop(
             # ICL examples or extra context, measured at the Paraformer baseline.
             "--mt-mode", "reference",
             "--context-turns", str(args.context_turns),
+            "--no-warm-names",
+            "--no-name-consistency",
         ])
         if args.hotword_cards:
             command.extend(["--hotword-cards", str(Path(args.hotword_cards).expanduser().resolve())])
@@ -2375,13 +2480,20 @@ def cloud_stream_loop(
     handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     logger.addHandler(handler)
     failures = 0
+    rapid_failures: List[float] = []
+    pcm_stream: Optional[PcmStream] = None
     try:
+        if args.audio_device != BROWSER_DEVICE:
+            pcm_stream = PcmStream(args.audio_device)
         while not stop_event.is_set():
             session_id = uuid.uuid4().hex[:12]
-            connection_state: Dict[str, object] = {"ok": False, "ended": False, "error": "", "connected_at": None}
+            connection_state: Dict[str, object] = {
+                "ok": False, "ended": False, "error": "", "connected_at": None,
+                "last_output": time.monotonic(),
+            }
             try:
                 run_cloud_session(args, state, stop_event, audio_holder, cloud_holder, browser_audio,
-                                  command, engine_name, session_id, connection_state)
+                                  pcm_stream, command, engine_name, session_id, connection_state)
             except Exception as exc:
                 connection_state["error"] = str(exc)
             if connection_state.get("fatal"):
@@ -2391,6 +2503,10 @@ def cloud_stream_loop(
             connected_at = connection_state.get("connected_at")
             if connected_at is not None and time.monotonic() - float(connected_at) >= 60:
                 failures = 0
+            now = time.monotonic()
+            if connected_at is None or now - float(connected_at) < 60:
+                rapid_failures.append(now)
+            rapid_failures = [item for item in rapid_failures if now - item < 300]
             failures += 1
             delay = cloud_retry_delay(failures)
             reason = str(connection_state.get("error") or "cloud worker exited")
@@ -2401,9 +2517,18 @@ def cloud_stream_loop(
             message = f"{engine_name} session {session_id}: {reason}; retry in {delay:g}s; last subtitle={latest.get('chunk') if latest else 'none'}"
             logger.warning(message)
             print(message, file=sys.stderr, flush=True)
+            if len(rapid_failures) >= 5:
+                stop_event.set()
+                state.set_status(f"{engine_name} crashed 5 times in 5 minutes; stopped")
+                print(f"{engine_name} crashed 5 times within 5 minutes; giving up. "
+                      f"See {args.work_dir / 'crash.log'}.", file=sys.stderr, flush=True)
+                break
             if stop_event.wait(delay):
                 break
     finally:
+        if pcm_stream is not None:
+            pcm_stream.stop()
+            audio_holder["proc"] = None
         handler.close()
         logger.removeHandler(handler)
 
@@ -2415,6 +2540,7 @@ def run_cloud_session(
     audio_holder: Dict[str, Optional[subprocess.Popen]],
     cloud_holder: Dict[str, Optional[subprocess.Popen]],
     browser_audio: BrowserAudioInput,
+    pcm_stream: Optional[PcmStream],
     command: List[str],
     engine_name: str,
     session_id: str,
@@ -2422,6 +2548,10 @@ def run_cloud_session(
 ) -> None:
     if not state.snapshot()["reconnecting"]:
         state.set_status(f"connecting to Alibaba Cloud {engine_name}")
+    child_options = bundled_child_options()
+    child_env = child_options.setdefault("env", os.environ.copy())
+    child_env["LIVE_INTERPRETER_WORK_DIR"] = str(args.work_dir)
+    child_env["LIVE_INTERPRETER_CRASH_LOG"] = str(args.work_dir / "crash.log")
     cloud_proc = subprocess.Popen(
         command,
         cwd=str(ROOT),
@@ -2429,7 +2559,7 @@ def run_cloud_session(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,
-        **bundled_child_options(),
+        **child_options,
     )
     cloud_holder["proc"] = cloud_proc
     ready = threading.Event()
@@ -2470,54 +2600,48 @@ def run_cloud_session(
                 connection_state["error"] = "connection initialization timed out or worker exited"
             return
         if args.audio_device == BROWSER_DEVICE:
-            browser_audio.discard_pending()
             state.set_status("waiting for Edge tab audio")
             if not cloud_proc.stdin:
                 raise RuntimeError(f"{engine_name} stream pipe is unavailable.")
             while not stop_event.is_set() and not connection_state["ended"] and cloud_proc.poll() is None:
+                check_worker_alive(connection_state, cloud_proc)
                 frame = browser_audio.read()
                 if not frame:
                     continue
                 cloud_proc.stdin.write(frame)
                 cloud_proc.stdin.flush()
             return
+        if pcm_stream is None:
+            raise RuntimeError("PCM audio source is unavailable.")
+        if not pcm_stream.alive():
+            pcm_stream.start()
+            audio_holder["proc"] = pcm_stream.proc
         while not stop_event.is_set() and not connection_state["ended"] and cloud_proc.poll() is None:
-            capture_proc = start_pcm_audio_capture(args.audio_device)
-            audio_holder["proc"] = capture_proc
-            capture_stderr_thread = threading.Thread(
-                target=forward_binary_stderr, args=(capture_proc, "audio"), daemon=True
-            )
-            capture_stderr_thread.start()
+            if not pcm_stream.alive():
+                restart_count += 1
+                audio_holder["proc"] = None
+                state.set_status("audio device changed; restarting capture")
+                print(f"Realtime audio capture stopped; restarting (attempt {restart_count}).",
+                      file=sys.stderr, flush=True)
+                pcm_stream.restart()
+                audio_holder["proc"] = pcm_stream.proc
+            if not cloud_proc.stdin:
+                raise RuntimeError(f"{engine_name} stream pipe is unavailable.")
             try:
-                if not capture_proc.stdout or not cloud_proc.stdin:
-                    raise RuntimeError(f"Audio or {engine_name} stream pipe is unavailable.")
                 while not stop_event.is_set() and not connection_state["ended"] and cloud_proc.poll() is None:
-                    frame = capture_proc.stdout.read(3200)
+                    check_worker_alive(connection_state, cloud_proc)
+                    frame = pcm_stream.read(timeout=0.5)
                     if not frame:
-                        break
+                        if not pcm_stream.alive():
+                            break
+                        continue
                     cloud_proc.stdin.write(frame)
                     cloud_proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
                 raise RuntimeError(f"audio stream interrupted: {exc}") from exc
-            finally:
-                stop_process(capture_proc)
-                capture_stderr_thread.join(timeout=1)
-                for stream in (capture_proc.stdout, capture_proc.stderr):
-                    if stream:
-                        stream.close()
-                audio_holder["proc"] = None
-
             if stop_event.is_set() or connection_state["ended"] or cloud_proc.poll() is not None:
                 break
-            code = capture_proc.poll()
-            restart_count += 1
-            state.set_status("audio device changed; reconnecting")
-            print(
-                f"Realtime audio capture stopped with code {code}; reconnecting "
-                f"(attempt {restart_count}).",
-                flush=True,
-            )
-            stop_event.wait(min(3.0, 0.5 * restart_count))
+            stop_event.wait(min(3.0, 0.5 * max(1, restart_count)))
     except Exception as exc:
         if stop_event.is_set():
             return
@@ -2534,7 +2658,10 @@ def run_cloud_session(
         output_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
         if not connection_state["error"] and not stop_event.is_set():
-            connection_state["error"] = f"cloud worker exited with code {cloud_proc.returncode}"
+            code = cloud_proc.returncode
+            connection_state["error"] = (
+                f"cloud worker exited: {runtime_safety.describe_exit_code(code)} (code {code})"
+            )
         cloud_holder["proc"] = None
         for stream in (cloud_proc.stdout, cloud_proc.stderr):
             if stream:
@@ -2905,4 +3032,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(runtime_safety.guard("backend-main", main))

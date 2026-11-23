@@ -13,10 +13,11 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
+        (str(ROOT / 'hotwords' / 'yumemita_bangdream_strict.txt'), 'hotwords'),
         (str(ROOT / 'hotwords' / 'yumemita_bangdream.txt'), 'hotwords'),
         (str(ROOT / 'hotwords' / 'name_cards.json'), 'hotwords'),
     ],
-    hiddenimports=[],
+    hiddenimports=['runtime_safety'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

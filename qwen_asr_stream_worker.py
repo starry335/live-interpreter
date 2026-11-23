@@ -35,19 +35,23 @@ from typing import Dict, List, Optional
 
 from gummy_realtime_worker import GummyConnection
 import hotwords
+import runtime_safety
 import warm_names
 
 
 ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming"
 DEFAULT_MT_MODEL = "deepseek-v4.1-flash-1017"
+TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
+MT_ATTEMPTS = 3
 HONORIFICS = ("ちゃん", "さん", "ちん", "たん", "くん", "様", "さま", "氏")
 LOGGER = logging.getLogger("qwen-asr-stream")
 
 
 def emit(payload: Dict[str, object]) -> None:
-    line = json.dumps(payload, ensure_ascii=True)
-    print(line, flush=True)
-    if payload.get("event") != "result" or payload.get("source_final") or payload.get("translation_final"):
+    runtime_safety.write_json(payload)
+    if payload.get("event") != "heartbeat" and (
+        payload.get("event") != "result" or payload.get("source_final") or payload.get("translation_final")
+    ):
         LOGGER.info(json.dumps({"time": dt.datetime.now().isoformat(timespec="milliseconds"), **payload}, ensure_ascii=True))
 
 
@@ -96,14 +100,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Drop translation terms whose source is shorter than this many characters.")
     parser.add_argument("--mt-drop-aliases", action="store_true",
                         help="Never send ASR-error-form aliases as translation terms.")
-    parser.add_argument("--mt-honorific", action="store_true",
+    parser.add_argument("--mt-honorific", action=argparse.BooleanOptionalAction, default=True,
                         help="Kana-only short terms are only injected when the sentence has an "
                              "honorific right after them (cuts homophone false triggers).")
     parser.add_argument("--mt-kana-min", type=int, default=4,
                         help="Kana-only terms at least this long skip the honorific requirement.")
     parser.add_argument("--context-turns", type=int, default=0,
                         help="Previous subtitles sent as context; 0 disables it (default).")
-    parser.add_argument("--short-context-chars", type=int, default=0,
+    parser.add_argument("--short-context-chars", type=int, default=12,
                         help="Also send one previous subtitle when the source is at most this many chars (0 disables).")
     parser.add_argument("--short-context-turns", type=int, default=1,
                         help="How many previous subtitles to send for a short source.")
@@ -121,7 +125,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Translate a long unfinished sentence provisionally, then replace it with the final translation.")
     parser.add_argument("--draft-after", type=float, default=4.0,
                         help="Start a draft after the sentence has been open this many seconds.")
-    parser.add_argument("--draft-after-chars", type=int, default=16,
+    parser.add_argument("--draft-after-chars", type=int, default=20,
                         help="Also start a draft once the partial reaches this many characters (0 disables).")
     parser.add_argument("--draft-interval", type=float, default=1.2,
                         help="Minimum seconds between drafts for one sentence.")
@@ -129,7 +133,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Do not draft sentences shorter than this many characters.")
     parser.add_argument("--draft-growth", type=int, default=6,
                         help="Require at least this many new characters since the previous draft.")
-    parser.add_argument("--draft-max", type=int, default=2,
+    parser.add_argument("--draft-max", type=int, default=1,
                         help="Maximum drafts per sentence.")
     parser.add_argument("--draft-mt-model", default="deepseek-v4.1-flash-1017",
                         help="Model used only for provisional drafts; empty reuses --mt-model.")
@@ -141,10 +145,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Background context for qwen-audio-3.1 input.context (names, readings, domain).")
     parser.add_argument("--correct-names", action="store_true",
                         help="Snap near-miss kana name spellings onto known readings before MT.")
-    parser.add_argument("--warm-names", action=argparse.BooleanOptionalAction, default=True,
-                        help="Recall game/anime names by pronunciation for the final MT prompt.")
-    parser.add_argument("--name-consistency", action=argparse.BooleanOptionalAction, default=True,
-                        help="Prefer the neighbouring name when one final uses a lone hotword name.")
+    parser.add_argument("--warm-names", action=argparse.BooleanOptionalAction, default=False,
+                        help="Recall game/anime names by pronunciation for the final MT prompt "
+                             "(off by default: precision-first).")
+    parser.add_argument("--name-consistency", action=argparse.BooleanOptionalAction, default=False,
+                        help="Prefer the neighbouring name when one final uses a lone hotword name "
+                             "(off by default: it can invent a different name).")
     parser.add_argument("--asr-warm", action=argparse.BooleanOptionalAction, default=True,
                         help="Send [asr-warm] terms at weight 1; --no-asr-warm keeps the hot list only.")
     args = parser.parse_args(argv)
@@ -165,7 +171,10 @@ class QwenASRStreamConnection(GummyConnection):
         self.ssl_context = ssl.create_default_context(cafile=self.certifi.where())
         self.translation_context = []
         self.source_history: List[str] = []
-        self.pending: queue.Queue = queue.Queue(maxsize=12)
+        self.pending: queue.Queue = queue.Queue(maxsize=24)
+        self.draft_cache: Dict[str, str] = {}
+        self.translation_queued = 0
+        self.translation_fallbacks = 0
         self.mt_thread: Optional[threading.Thread] = None
         self.mt_stop = threading.Event()
         self.mt_fatal = threading.Event()
@@ -379,6 +388,8 @@ class QwenASRStreamConnection(GummyConnection):
             if self.args.translation_enabled:
                 try:
                     self.pending.put_nowait(result)
+                    self.translation_queued += 1
+                    emit({"event": "translation_queued", "sentence_id": sentence_id})
                 except queue.Full:
                     self._translation_failed(result, "Translation queue full; showing original text.")
         else:
@@ -418,8 +429,6 @@ class QwenASRStreamConnection(GummyConnection):
             terms = [term for term in terms if term.source not in alias_sources]
         if terms and getattr(self.args, "mt_min_chars", 0):
             terms = [term for term in terms if len(term.source) >= self.args.mt_min_chars]
-        if terms and getattr(self.args, "mt_honorific", False):
-            terms = [term for term in terms if self._term_allowed(term.source, text)]
         mode = getattr(self.args, "mt_mode", "force")
         if mode == "background" and self.hotword_config:
             background_pairs = "; ".join(
@@ -557,6 +566,11 @@ class QwenASRStreamConnection(GummyConnection):
                         "translation_final": False, "streaming": True,
                     })
                     last_emit = now
+        except Exception as exc:
+            partial = "".join(content).strip()
+            if partial:
+                raise runtime_safety.PartialTranslation(partial) from exc
+            raise
         finally:
             connection.close()
         latency_ms = round((time.monotonic() - started) * 1000)
@@ -631,8 +645,6 @@ class QwenASRStreamConnection(GummyConnection):
             terms = [term for term in terms if term.source not in alias_sources]
         if terms and getattr(self.args, "mt_min_chars", 0):
             terms = [term for term in terms if len(term.source) >= self.args.mt_min_chars]
-        if terms and getattr(self.args, "mt_honorific", False):
-            terms = [term for term in terms if self._term_allowed(term.source, text)]
         mode = getattr(self.args, "mt_mode", "force")
         system_prompt = hotwords.build_system_prompt(
             mode, terms, self.args.source_language, self.args.target_language,
@@ -685,6 +697,10 @@ class QwenASRStreamConnection(GummyConnection):
                 with self.final_lock:
                     if sentence_id in self.finalizing or sentence_id in self.finalized:
                         continue
+                    self.draft_cache[sentence_id] = translated
+                    if len(self.draft_cache) > 64:
+                        for old_key in list(self.draft_cache)[:-32]:
+                            self.draft_cache.pop(old_key, None)
                     emit({
                         "event": "result", "sentence_id": sentence_id,
                         "translation": translated, "translation_final": False,
@@ -696,15 +712,25 @@ class QwenASRStreamConnection(GummyConnection):
             finally:
                 self.draft_queue.task_done()
 
-    def _translation_failed(self, result: Dict[str, object], reason: str) -> None:
+    def _translation_failed(self, result: Dict[str, object], reason: str,
+                            partial: str = "") -> None:
         self.mt_failures += 1
         sentence_id = str(result["sentence_id"])
+        draft = self.draft_cache.pop(sentence_id, "")
+        translated = (partial or draft or str(result["source"] or "")).strip()
+        fallback = not partial and not draft
+        if fallback:
+            self.translation_fallbacks += 1
         with self.final_lock:
             self.finalized.add(sentence_id)
+        reason = str(reason).replace(self.api_key, "[redacted]")[:300]
         emit({"event": "warning", "message": f"{self.args.mt_model}: {reason}",
               "sentence_id": result["sentence_id"]})
+        emit({"event": "translation_failed", "sentence_id": result["sentence_id"],
+              "reason": reason, "fallback": fallback})
         emit({"event": "result", "sentence_id": result["sentence_id"],
-              "translation": result["source"], "translation_final": True})
+              "translation": translated, "translation_final": True,
+              "fallback": fallback, "partial": bool(partial)})
 
     def _translate_loop(self) -> None:
         while not self.mt_stop.is_set() or not self.pending.empty():
@@ -713,24 +739,52 @@ class QwenASRStreamConnection(GummyConnection):
             except queue.Empty:
                 continue
             sentence_id = str(result["sentence_id"])
+            with self.final_lock:
+                self.finalizing.add(sentence_id)
+            emit({"event": "translation_started", "sentence_id": result["sentence_id"]})
+            attempt = 0
             try:
-                with self.final_lock:
-                    self.finalizing.add(sentence_id)
-                translated = self.translate(str(result["source"]), sentence_id)
-                with self.final_lock:
-                    self.finalized.add(sentence_id)
-                    emit({"event": "result", "sentence_id": result["sentence_id"],
-                          "translation": translated, "translation_final": True})
-            except urllib.error.HTTPError as exc:
-                reason = f"HTTP {exc.code}: {exc.read(2048).decode('utf-8', errors='replace')}"
-                self._translation_failed(result, reason.replace(self.api_key, "[redacted]"))
-                if exc.code in {400, 401, 403, 404}:
-                    self.error = f"{self.args.mt_model} configuration or authorization failed; stopping."
-                    self.mt_fatal.set()
-                    emit({"event": "fatal_error", "message": self.error})
-                    return
-            except Exception as exc:
-                self._translation_failed(result, str(exc).replace(self.api_key, "[redacted]"))
+                while attempt < MT_ATTEMPTS:
+                    attempt += 1
+                    try:
+                        translated = self.translate(str(result["source"]), sentence_id)
+                        self.draft_cache.pop(sentence_id, None)
+                        with self.final_lock:
+                            self.finalized.add(sentence_id)
+                            emit({"event": "result", "sentence_id": result["sentence_id"],
+                                  "translation": translated, "translation_final": True})
+                        break
+                    except runtime_safety.PartialTranslation as exc:
+                        self.draft_cache.pop(sentence_id, None)
+                        with self.final_lock:
+                            self.finalized.add(sentence_id)
+                            emit({"event": "result", "sentence_id": result["sentence_id"],
+                                  "translation": exc.text, "translation_final": True,
+                                  "partial": True})
+                        break
+                    except urllib.error.HTTPError as exc:
+                        reason = f"HTTP {exc.code}: {exc.read(2048).decode('utf-8', errors='replace')}"
+                        if exc.code in {400, 401, 403, 404}:
+                            self._translation_failed(result, reason)
+                            self.error = (
+                                f"{self.args.mt_model} configuration or authorization failed; stopping."
+                            )
+                            self.mt_fatal.set()
+                            emit({"event": "fatal_error", "message": self.error})
+                            return
+                        if exc.code not in TRANSIENT_HTTP or attempt >= MT_ATTEMPTS:
+                            self._translation_failed(result, reason)
+                            break
+                        time.sleep(0.25 * attempt)
+                    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                        reason = f"{type(exc).__name__}: {exc}"
+                        if attempt >= MT_ATTEMPTS:
+                            self._translation_failed(result, reason)
+                            break
+                        time.sleep(0.25 * attempt)
+                    except Exception as exc:
+                        self._translation_failed(result, f"{type(exc).__name__}: {exc}")
+                        break
             finally:
                 self.pending.task_done()
 
@@ -739,7 +793,7 @@ class QwenASRStreamConnection(GummyConnection):
         self.mt_stop.set()
         self.draft_stop.set()
         if self.mt_thread:
-            self.mt_thread.join(timeout=3)
+            self.mt_thread.join(timeout=10)
         if self.draft_thread:
             self.draft_thread.join(timeout=3)
         emit({
@@ -750,6 +804,8 @@ class QwenASRStreamConnection(GummyConnection):
             "asr_input_tokens": getattr(self, "asr_input_tokens", 0),
             "asr_output_tokens": getattr(self, "asr_output_tokens", 0),
             "translation_requests": self.mt_requests, "translation_failures": self.mt_failures,
+            "translation_queued": self.translation_queued,
+            "translation_fallbacks": self.translation_fallbacks,
             "draft_requests": self.draft_requests, "draft_failures": self.draft_failures,
             "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
             "draft_input_tokens": self.draft_input_tokens,
@@ -761,6 +817,10 @@ class QwenASRStreamConnection(GummyConnection):
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    work_dir = Path(args.log_file).expanduser().parent if args.log_file else os.environ.get(
+        "LIVE_INTERPRETER_WORK_DIR", ""
+    )
+    runtime_safety.install("qwen-asr", work_dir)
     handler = None
     if args.log_file:
         path = Path(args.log_file)
@@ -804,4 +864,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(runtime_safety.guard("qwen-asr", main))

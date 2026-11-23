@@ -11,13 +11,14 @@ import uuid
 from typing import Dict, List, Optional
 
 import hotwords
+import runtime_safety
 
 
 GUMMY_WEBSOCKET_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
 
 
 def emit(payload: Dict[str, object]) -> None:
-    print(json.dumps(payload, ensure_ascii=True), flush=True)
+    runtime_safety.write_json(payload)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -56,6 +57,7 @@ class GummyConnection:
         self.ws = None
         self.receiver: Optional[threading.Thread] = None
         self.error = ""
+        self.heartbeat: Optional[runtime_safety.Heartbeat] = None
         self.hotword_config = getattr(args, "hotword_config", None)
 
     def open(self) -> None:
@@ -79,6 +81,8 @@ class GummyConnection:
         if not self.started.wait(timeout=20) or self.failed.is_set():
             raise RuntimeError(self.error or f"Timed out waiting for {self.engine_name} task-started.")
         emit({"event": "ready", "task_id": self.task_id})
+        self.heartbeat = runtime_safety.Heartbeat(emit)
+        self.heartbeat.start()
 
     def task_request(self) -> Dict[str, object]:
         return {
@@ -195,6 +199,8 @@ class GummyConnection:
     def close(self) -> None:
         if self.ws is None:
             return
+        if self.heartbeat:
+            self.heartbeat.stop()
         if self.started.is_set() and not self.failed.is_set() and not self.finished.is_set():
             try:
                 self.ws.send(
@@ -221,6 +227,7 @@ class GummyConnection:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    runtime_safety.install("gummy", os.environ.get("LIVE_INTERPRETER_WORK_DIR", ""))
     args.hotword_config = None
     if str(getattr(args, "hotwords", "")).strip():
         try:
@@ -259,4 +266,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(runtime_safety.guard("gummy", main))

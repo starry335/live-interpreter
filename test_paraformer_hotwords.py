@@ -90,7 +90,7 @@ class ParaformerHotwordTests(unittest.TestCase):
             connection.translate("ゆのちと一緒にやる")
         body = json.loads(post.call_args.args[0].data)
         self.assertNotIn("translation_options", body)
-        self.assertIn("ゆのち=>由乃亲", body["messages"][0]["content"])
+        self.assertIn("ゆのち => 由乃亲", body["messages"][0]["content"])
 
     def test_bad_hotword_file_is_a_fatal_startup_error(self):
         missing = str(Path(self.directory.name) / "missing.txt")
@@ -113,7 +113,7 @@ class ParaformerHotwordTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test"}), \
                 mock.patch.object(live, "run_cloud_session", side_effect=failed) as session:
             live.cloud_stream_loop(args, live.State(), stop, {"proc": None}, {"proc": None}, live.BrowserAudioInput())
-        command = session.call_args.args[6]
+        command = session.call_args.args[7]
         self.assertIn("--hotwords", command)
         self.assertEqual(command[command.index("--hotwords") + 1], str(self.path.resolve()))
 

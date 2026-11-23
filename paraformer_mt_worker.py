@@ -20,10 +20,13 @@ from typing import Dict, List, Optional
 
 from gummy_realtime_worker import GummyConnection
 import hotwords
+import runtime_safety
 
 
 ASR_MODEL = "paraformer-realtime-v2"
 MT_MODEL = "qwen-mt-lite"
+TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
+MT_ATTEMPTS = 3
 HONORIFICS = ("ちゃん", "さん", "ちん", "たん", "くん", "様", "さま", "氏")
 MT_MODELS = (
     "qwen-mt-lite", "qwen-mt-flash", "qwen-mt-plus",
@@ -33,9 +36,10 @@ LOGGER = logging.getLogger("paraformer-mt")
 
 
 def emit(payload: Dict[str, object]) -> None:
-    line = json.dumps(payload, ensure_ascii=True)
-    print(line, flush=True)
-    if payload.get("event") != "result" or payload.get("source_final") or payload.get("translation_final"):
+    runtime_safety.write_json(payload)
+    if payload.get("event") != "heartbeat" and (
+        payload.get("event") != "result" or payload.get("source_final") or payload.get("translation_final")
+    ):
         LOGGER.info(json.dumps({"time": dt.datetime.now().isoformat(timespec="milliseconds"), **payload}, ensure_ascii=True))
 
 
@@ -56,7 +60,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Optional JSON {source: attribute} giving ICL name cards (e.g. 人名/乐队名 + homophone note).")
     parser.add_argument("--mt-min-chars", type=int, default=0)
     parser.add_argument("--mt-drop-aliases", action="store_true")
-    parser.add_argument("--mt-honorific", action="store_true")
+    parser.add_argument("--mt-honorific", action=argparse.BooleanOptionalAction, default=True,
+                        help="Kana-only short terms are only injected with a strong name context.")
     parser.add_argument("--mt-kana-min", type=int, default=4)
     parser.add_argument("--context-turns", type=int, default=0,
                         help="Previous subtitles sent as context; 0 disables it (default).")
@@ -85,7 +90,9 @@ class ParaformerMTConnection(GummyConnection):
         self.websocket_url = f"wss://{host}/api-ws/v1/inference"
         self.translation_url = f"https://{host}/compatible-mode/v1/chat/completions"
         self.ssl_context = ssl.create_default_context(cafile=self.certifi.where())
-        self.pending: queue.Queue = queue.Queue(maxsize=6)
+        self.pending: queue.Queue = queue.Queue(maxsize=24)
+        self.translation_queued = 0
+        self.translation_fallbacks = 0
         self.mt_thread: Optional[threading.Thread] = None
         self.mt_stop = threading.Event()
         self.mt_fatal = threading.Event()
@@ -199,6 +206,8 @@ class ParaformerMTConnection(GummyConnection):
             if self.args.translation_enabled:
                 try:
                     self.pending.put_nowait(result)
+                    self.translation_queued += 1
+                    emit({"event": "translation_queued", "sentence_id": sentence_id})
                 except queue.Full:
                     self._translation_failed(result, "Translation queue full; showing original text.")
 
@@ -226,8 +235,6 @@ class ParaformerMTConnection(GummyConnection):
             terms = [term for term in terms if term.source not in alias_sources]
         if terms and getattr(self.args, "mt_min_chars", 0):
             terms = [term for term in terms if len(term.source) >= self.args.mt_min_chars]
-        if terms and getattr(self.args, "mt_honorific", False):
-            terms = [term for term in terms if self._term_allowed(term.source, text)]
         body = {
             "model": self.args.mt_model,
             "messages": [{"role": "user", "content": text}],
@@ -301,8 +308,15 @@ class ParaformerMTConnection(GummyConnection):
 
     def _translation_failed(self, result: Dict[str, object], reason: str) -> None:
         self.mt_failures += 1
-        emit({"event": "warning", "message": f"{self.args.mt_model}: {reason}", "sentence_id": result["sentence_id"]})
-        emit({"event": "result", "sentence_id": result["sentence_id"], "translation": result["source"], "translation_final": True})
+        self.translation_fallbacks += 1
+        reason = str(reason).replace(self.api_key, "[redacted]")[:300]
+        emit({"event": "warning", "message": f"{self.args.mt_model}: {reason}",
+              "sentence_id": result["sentence_id"]})
+        emit({"event": "translation_failed", "sentence_id": result["sentence_id"],
+              "reason": reason, "fallback": True})
+        emit({"event": "result", "sentence_id": result["sentence_id"],
+              "translation": result["source"], "translation_final": True,
+              "fallback": True})
 
     def _translate_loop(self) -> None:
         while not self.mt_stop.is_set() or not self.pending.empty():
@@ -310,20 +324,41 @@ class ParaformerMTConnection(GummyConnection):
                 result = self.pending.get(timeout=0.1)
             except queue.Empty:
                 continue
+            sentence_id = result["sentence_id"]
+            emit({"event": "translation_started", "sentence_id": sentence_id})
+            attempt = 0
             try:
-                translated = self.translate(str(result["source"]), str(result["sentence_id"]))
-                emit({"event": "result", "sentence_id": result["sentence_id"], "translation": translated, "translation_final": True})
-            except urllib.error.HTTPError as exc:
-                # Do not resend a paid translation automatically: retries can duplicate billing.
-                reason = f"HTTP {exc.code}: {exc.read(2048).decode('utf-8', errors='replace')}"
-                self._translation_failed(result, reason.replace(self.api_key, "[redacted]"))
-                if exc.code in {400, 401, 403, 404}:
-                    self.error = f"{self.args.mt_model} configuration or authorization failed; stopping to avoid ongoing ASR charges."
-                    self.mt_fatal.set()
-                    emit({"event": "fatal_error", "message": self.error})
-                    return
-            except Exception as exc:
-                self._translation_failed(result, str(exc).replace(self.api_key, "[redacted]"))
+                while attempt < MT_ATTEMPTS:
+                    attempt += 1
+                    try:
+                        translated = self.translate(str(result["source"]), str(sentence_id))
+                        emit({"event": "result", "sentence_id": sentence_id,
+                              "translation": translated, "translation_final": True})
+                        break
+                    except urllib.error.HTTPError as exc:
+                        reason = f"HTTP {exc.code}: {exc.read(2048).decode('utf-8', errors='replace')}"
+                        if exc.code in {400, 401, 403, 404}:
+                            self._translation_failed(result, reason)
+                            self.error = (
+                                f"{self.args.mt_model} configuration or authorization failed; "
+                                "stopping to avoid ongoing ASR charges."
+                            )
+                            self.mt_fatal.set()
+                            emit({"event": "fatal_error", "message": self.error})
+                            return
+                        if exc.code not in TRANSIENT_HTTP or attempt >= MT_ATTEMPTS:
+                            self._translation_failed(result, reason)
+                            break
+                        time.sleep(0.25 * attempt)
+                    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                        reason = f"{type(exc).__name__}: {exc}"
+                        if attempt >= MT_ATTEMPTS:
+                            self._translation_failed(result, reason)
+                            break
+                        time.sleep(0.25 * attempt)
+                    except Exception as exc:
+                        self._translation_failed(result, f"{type(exc).__name__}: {exc}")
+                        break
             finally:
                 self.pending.task_done()
 
@@ -331,13 +366,15 @@ class ParaformerMTConnection(GummyConnection):
         super().close()
         self.mt_stop.set()
         if self.mt_thread:
-            self.mt_thread.join(timeout=3)
+            self.mt_thread.join(timeout=10)
         emit({
             "event": "usage_summary", "task_id": self.task_id,
             "asr_model": ASR_MODEL, "translation_model": self.args.mt_model,
             "audio_sent_seconds": round(self.audio_bytes / 32000, 3),
             "asr_billed_seconds": self.asr_duration,
             "translation_requests": self.mt_requests, "translation_failures": self.mt_failures,
+            "translation_queued": self.translation_queued,
+            "translation_fallbacks": self.translation_fallbacks,
             "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
             "translation_pending": self.pending.qsize() + (1 if self.mt_thread and self.mt_thread.is_alive() else 0),
             "hotwords": self.hotword_config.summary() if self.hotword_config else None,
@@ -347,6 +384,10 @@ class ParaformerMTConnection(GummyConnection):
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    work_dir = Path(args.log_file).expanduser().parent if args.log_file else os.environ.get(
+        "LIVE_INTERPRETER_WORK_DIR", ""
+    )
+    runtime_safety.install("paraformer-mt", work_dir)
     handler = None
     if args.log_file:
         path = Path(args.log_file)
@@ -390,4 +431,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(runtime_safety.guard("paraformer-mt", main))

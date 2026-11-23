@@ -56,15 +56,15 @@ class IclToggleTests(unittest.TestCase):
         app = self.make_app()
         self.assertEqual(app.asr_engine.get(), "paraformer-mt")
         self.assertEqual(app.mt_model.get(), "qwen3.8-max")
-        self.assertTrue(app.icl_enabled.get())
+        self.assertFalse(app.icl_enabled.get())
         app.update_model_controls()
         self.assertNotEqual(str(app.icl_check["state"]), "disabled")
         self.enable_frozen(app)
         command = app.command()
-        self.assertEqual(command[command.index("--mt-mode") + 1], "icl")
-        self.assertIn("--hotword-cards", command)
+        self.assertEqual(command[command.index("--mt-mode") + 1], "reference")
+        self.assertNotIn("--hotword-cards", command)
         hotwords_arg = command[command.index("--hotwords") + 1]
-        self.assertTrue(hotwords_arg.endswith("yumemita_bangdream.txt"))
+        self.assertTrue(hotwords_arg.endswith("yumemita_bangdream_strict.txt"))
 
     def test_switching_to_3_1_uses_the_shorter_silence_default(self):
         app = self.make_app()
@@ -79,23 +79,23 @@ class IclToggleTests(unittest.TestCase):
         self.enable_frozen(app)
         command = app.command()
         self.assertIn("--hotwords", command)
-        self.assertTrue(command[command.index("--hotwords") + 1].endswith("yumemita_bangdream.txt"))
-        self.assertEqual(command[command.index("--mt-mode") + 1], "icl")
+        self.assertTrue(command[command.index("--hotwords") + 1].endswith("yumemita_bangdream_strict.txt"))
+        self.assertEqual(command[command.index("--mt-mode") + 1], "reference")
 
-    def test_icl_is_on_by_default_and_can_be_switched_off(self):
+    def test_icl_is_off_by_default_and_can_be_switched_on(self):
         app = self.make_app()
         app.asr_engine.set("paraformer-mt")
         app.mt_model.set("qwen3.8-max")
-        self.assertTrue(app.icl_enabled.get())
+        self.assertFalse(app.icl_enabled.get())
         self.enable_frozen(app)
+        command = app.command()
+        self.assertEqual(command[command.index("--mt-mode") + 1], "reference")
+        self.assertNotIn("--hotword-cards", command)
+
+        app.icl_enabled.set(True)
         command = app.command()
         self.assertEqual(command[command.index("--mt-mode") + 1], "icl")
         self.assertIn("--hotword-cards", command)
-
-        app.icl_enabled.set(False)
-        command = app.command()
-        self.assertEqual(command[command.index("--mt-mode") + 1], "force")
-        self.assertNotIn("--hotword-cards", command)
 
     def test_qwen_mt_models_disable_the_toggle(self):
         app = self.make_app()
@@ -115,7 +115,15 @@ class IclToggleTests(unittest.TestCase):
         self.enable_frozen(app)
         command = app.command()
         self.assertEqual(command[command.index("--asr-engine") + 1], "qwen3.1-audio")
-        self.assertEqual(command[command.index("--mt-mode") + 1], "icl")
+        self.assertEqual(command[command.index("--mt-mode") + 1], "reference")
+
+    def test_qwen_audio_3_1_with_edge_audio_is_not_silently_switched(self):
+        app = self.make_app()
+        app.asr_engine.set("qwen3.1-audio")
+        app.audio_device.set(launcher.EDGE_TAB_LABEL)
+        self.enable_frozen(app)
+        command = app.command()
+        self.assertEqual(command[command.index("--asr-engine") + 1], "qwen3.1-audio")
 
     def test_engine_id_is_listed_in_the_dropdown_source(self):
         source = Path(launcher.__file__).read_text(encoding="utf-8")
