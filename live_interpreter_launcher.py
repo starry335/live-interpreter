@@ -23,7 +23,7 @@ import launcher_settings
 import runtime_safety
 
 
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.4.0"
 APP_TITLE = f"Live Interpreter v{APP_VERSION}"
 STRING_SETTINGS = (
     "audio_device", "source_language", "target_language", "asr_engine", "mt_model",
@@ -605,9 +605,10 @@ class Launcher:
             self.visual_enabled.set(False)
         if is_qwen_asr:
             self.visual_enabled.set(False)
-        if self.asr_engine.get() == "qwen3.1-audio" and str(self.gummy_max_end_silence.get()).strip() == "500":
-            # 3.1 builds longer segments; 300 ms keeps subtitle latency close to Paraformer.
-            self.gummy_max_end_silence.set("300")
+        if self.asr_engine.get() == "qwen3.1-audio" and str(self.gummy_max_end_silence.get()).strip() in {"500", "300"}:
+            # 400 ms measured best balance of fragmentation / charF1 / first-zh
+            # on the full gold-v0.3 set; only change a default-looking value.
+            self.gummy_max_end_silence.set("400")
         self.visual_button.configure(state="disabled" if is_paraformer_mt or is_qwen_asr else "normal")
         is_text_mt = self.asr_engine.get() in {"paraformer-mt", "qwen3.1-audio"}
         self.mt_combo.configure(state="readonly" if is_text_mt else "disabled")
@@ -621,7 +622,7 @@ class Launcher:
         self.model_note.configure(text=(
             "Paraformer：仅北京；翻译模型可选；通用大模型关闭深度思考。"
             if is_paraformer_mt else
-            "Qwen3.1 流式识别：句末静音建议 300 ms（默认已切换）；翻译模型与热词小抄同上。"
+            "Qwen3.1 流式识别：句末静音建议 400 ms（默认已切换）；翻译模型与热词小抄同上。"
             if self.asr_engine.get() == "qwen3.1-audio" else
             "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
         ))

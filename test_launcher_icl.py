@@ -71,7 +71,7 @@ class IclToggleTests(unittest.TestCase):
         self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
         app.asr_engine.set("qwen3.1-audio")
         app.update_model_controls()
-        self.assertEqual(str(app.gummy_max_end_silence.get()), "300")
+        self.assertEqual(str(app.gummy_max_end_silence.get()), "400")
 
     def test_qwen_audio_3_1_gets_the_builtin_hotword_list(self):
         app = self.make_app()
