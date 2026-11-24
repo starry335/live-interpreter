@@ -23,7 +23,7 @@ import launcher_settings
 import runtime_safety
 
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 APP_TITLE = f"Live Interpreter v{APP_VERSION}"
 STRING_SETTINGS = (
     "audio_device", "source_language", "target_language", "asr_engine", "mt_model",
