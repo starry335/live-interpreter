@@ -76,8 +76,8 @@ Fitness Boxing => 健身拳击
 ミュータイプ => MewType
 みゅーたいぷ => MewType
 MewType => MewType
-MyGO => MyGO!!!!!
-マイゴー => MyGO!!!!!
+MyGO => MyGO
+マイゴー => MyGO
 Mujica => Mujica
 AveMujica => Ave Mujica
 Ave Mujica => Ave Mujica
@@ -166,7 +166,9 @@ YUNO => 由乃
 夢限大宮タイプ => 梦限大
 夢限大ミュータイプ => 梦限大
 夢限大みゅータイプ => 梦限大
-MyGO!!!!! => MyGO!!!!!
+MyGO!!!!! => MyGO
+ゆめ∞みた => 梦限大
+ゆめ∞みたー => 梦限大
 
 [forbidden]
 战国由乃 => 由乃

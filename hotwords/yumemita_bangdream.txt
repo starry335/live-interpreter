@@ -96,10 +96,9 @@ Morfonica => Morfonica
 RAISE A SUILEN => RAISE A SUILEN
 レイズ => RAISE A SUILEN
 RAS => RAISE A SUILEN
-マイゴー => MyGO!!!!!
-MyGO!!!!! => MyGO!!!!!
-MyGO => MyGO!!!!!
-マイゴ => MyGO!!!!!
+マイゴー => MyGO
+MyGO => MyGO
+マイゴ => MyGO
 アヴェムジカ => Ave Mujica
 アヴェ・ムジカ => Ave Mujica
 Ave Mujica => Ave Mujica
@@ -211,6 +210,7 @@ mujica => Mujica
 
 
 [aliases]
+MyGO!!!!! => MyGO
 のちゃん => 野乃花
 ノちゃん => 野乃花
 

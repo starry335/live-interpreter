@@ -62,6 +62,8 @@ class IclToggleTests(unittest.TestCase):
         self.enable_frozen(app)
         command = app.command()
         self.assertEqual(command[command.index("--mt-mode") + 1], "reference")
+        self.assertEqual(command[command.index("--mt-model") + 1], "qwen3.8-max")
+        self.assertEqual(command[command.index("--gummy-max-end-silence") + 1], "500")
         self.assertNotIn("--hotword-cards", command)
         hotwords_arg = command[command.index("--hotwords") + 1]
         self.assertTrue(hotwords_arg.endswith("yumemita_bangdream_strict.txt"))
@@ -129,10 +131,21 @@ class IclToggleTests(unittest.TestCase):
         source = Path(launcher.__file__).read_text(encoding="utf-8")
         self.assertIn("qwen3.1-audio", source)
 
-    def test_legacy_engine_setting_is_mapped(self):
+    def test_old_3_1_settings_migrate_to_paraformer_defaults(self):
+        launcher_settings.save(self.directory / "settings.json", {
+            "settings_version": 2, "asr_engine": "qwen3.1-audio",
+            "gummy_max_end_silence": "300", "icl_enabled": True,
+        })
+        app = self.make_app()
+        self.assertEqual(app.asr_engine.get(), "paraformer-mt")
+        self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
+        self.assertFalse(app.icl_enabled.get())
+
+    def test_legacy_engine_setting_is_migrated_to_paraformer(self):
         launcher_settings.save(self.directory / "settings.json", {"asr_engine": "qwen-audio-stream"})
         app = self.make_app()
-        self.assertEqual(app.asr_engine.get(), "qwen3.1-audio")
+        self.assertEqual(app.asr_engine.get(), "paraformer-mt")
+        self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
 
 
 if __name__ == "__main__":

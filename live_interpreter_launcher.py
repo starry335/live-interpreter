@@ -23,7 +23,7 @@ import launcher_settings
 import runtime_safety
 
 
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.2"
 APP_TITLE = f"Live Interpreter v{APP_VERSION}"
 STRING_SETTINGS = (
     "audio_device", "source_language", "target_language", "asr_engine", "mt_model",
@@ -283,7 +283,7 @@ class Launcher:
         self.overlay_show_source = BooleanVar(value=False)
         self.record_screen = BooleanVar(value=False)
         self.translate_enabled = BooleanVar(value=True)
-        self.visual_enabled = BooleanVar(value=True)
+        self.visual_enabled = BooleanVar(value=False)
 
         self._build_ui()
         self.restore_settings()
@@ -309,12 +309,21 @@ class Launcher:
         for name in BOOL_SETTINGS:
             if type(saved.get(name)) is bool:
                 getattr(self, name).set(saved[name])
-        if saved.get("settings_version") != 2:
+        if saved.get("settings_version", 0) < 3:
             # Old installs saved the previous ICL-on default. 0.4.x is
             # precision-first, so migrate once; the user can turn it back on.
             if self.icl_enabled.get():
                 self.icl_enabled.set(False)
                 self.add_log("旧配置的 ICL 已关闭（精确优先默认）；需要时在界面重新打开。")
+        if saved.get("settings_version", 0) < 3 and self.asr_engine.get() in {
+            "qwen3.1-audio", "qwen-audio-stream",
+        }:
+            # Paraformer is the stable default from 0.4.2 onward.
+            self.asr_engine.set("paraformer-mt")
+            if str(self.gummy_max_end_silence.get()).strip() in {"200", "300", "400"}:
+                self.gummy_max_end_silence.set("500")
+            self.aliyun_region.set("beijing")
+            self.add_log("默认识别引擎已切换为 Paraformer（稳定档，500ms）；需要 3.1 时可在下拉框手动选回。")
         self._key_blob = saved.get("api_key_dpapi", "") if isinstance(saved.get("api_key_dpapi", ""), str) else ""
         if "api_key_dpapi" in saved:
             try:
@@ -343,7 +352,7 @@ class Launcher:
             return True
         try:
             values = {name: getattr(self, name).get() for name in (*STRING_SETTINGS, *BOOL_SETTINGS)}
-            values["settings_version"] = 2
+            values["settings_version"] = 3
             key = self.aliyun_api_key.get()
             # Reuse the existing blob if the key did not change, including a blob
             # that could not be decrypted after moving the settings to another user.

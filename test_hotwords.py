@@ -175,13 +175,14 @@ class HotwordFileTests(unittest.TestCase):
                      "ミュータイプ", "みゅーたいぷ", "夢限大", "無限大",
                      "ヴィオラ", "ビオラ", "Viola"):
             self.assertIn(term, asr, term)
-        self.assertEqual(config.translation_phrases()["MyGO"], "MyGO!!!!!")
+        self.assertEqual(config.translation_phrases()["MyGO"], "MyGO")
         self.assertEqual(config.translation_phrases()["Mujica"], "Mujica")
         self.assertEqual(config.translation_phrases()["MewType"], "MewType")
         self.assertEqual(config.translation_phrases()["ヴィオラ"], "薇欧拉")
-        # Punctuation is MT-only; the ASR surface stays clean.
+        # Decorative official spellings never reach the subtitle.
         self.assertNotIn("MyGO!!!!!", asr)
-        self.assertTrue(all("#" not in term for term in asr))
+        self.assertFalse(any("∞" in term.target for term in config.mt_terms()))
+        self.assertEqual(config.postprocess("MyGO!!!!! 和 梦限大∞"), "MyGO 和 梦限大")
         self.assertLessEqual(len(config.mt_terms()), 200)
 
     def test_invalid_files_fail_fast(self):

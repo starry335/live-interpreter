@@ -2815,13 +2815,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--asr-engine",
         choices=[*QWEN_LIVE_MODELS, "gummy", "paraformer-mt", "qwen3.1-audio", "streaming", "sensevoice"],
-        default="qwen3.5-live",
+        default="paraformer-mt",
     )
     parser.add_argument("--target-language", default="Chinese", help="Translation target language.")
     parser.add_argument("--translation-engine", choices=["qwen", "none"], default="qwen")
     parser.add_argument("--mt-model", default="qwen3.8-max", help="Text translation model for paraformer-mt / qwen-audio-stream.")
-    parser.add_argument("--mt-mode", default="icl", choices=["force", "reference", "background", "icl", "icl2"],
-                        help="Translation prompt mode; icl ships name cards and contrastive examples.")
+    parser.add_argument("--mt-mode", default="reference", choices=["force", "reference", "background", "icl", "icl2"],
+                        help="Translation prompt mode; reference is the precision-first default.")
     parser.add_argument("--hotword-cards", default="", help="JSON {source: attribute} for ICL name cards.")
     parser.add_argument("--context-turns", type=int, default=0,
                         help="Previous subtitles sent as context; 0 disables it (default).")

@@ -356,6 +356,9 @@ class HotwordConfig:
         for term in sorted(self.forbidden, key=lambda item: -len(item.source)):
             if term.source and term.source != term.target:
                 out = out.replace(term.source, term.target)
+        # Decorative official spellings: MyGO!!!!! -> MyGO, 梦限大∞ -> 梦限大.
+        out = re.sub(r"MyGO\s*[!！]+", "MyGO", out, flags=re.IGNORECASE)
+        out = out.replace("∞", "")
         # 都子 is a two-character Chinese given name; never shorten it to 都酱.
         out = out.replace("みやこ酱", "都子酱").replace("みやこちゃん", "都子酱")
         out = out.replace("都酱", "都子酱")
