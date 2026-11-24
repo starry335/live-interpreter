@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import ssl
 import sys
 import threading
@@ -56,8 +57,11 @@ class GummyConnection:
         self.failed = threading.Event()
         self.ws = None
         self.receiver: Optional[threading.Thread] = None
+        self.pinger: Optional[threading.Thread] = None
         self.error = ""
         self.heartbeat: Optional[runtime_safety.Heartbeat] = None
+        self.close_code: Optional[int] = None
+        self.close_reason = ""
         self.hotword_config = getattr(args, "hotword_config", None)
 
     def open(self) -> None:
@@ -69,12 +73,20 @@ class GummyConnection:
             ],
             timeout=10,
             enable_multithread=True,
+            sockopt=[(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)],
             sslopt={
                 "ca_certs": self.certifi.where(),
                 "cert_reqs": ssl.CERT_REQUIRED,
             },
         )
         self.ws.settimeout(10.0)
+        try:
+            if os.name == "nt" and self.ws.sock is not None:
+                # 30 s idle / 5 s probe: catches dead NAT entries before the
+                # gateway resets a long-lived WebSocket.
+                self.ws.sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 30000, 5000))
+        except (OSError, AttributeError):
+            pass
         self.receiver = threading.Thread(target=self._receive_loop, daemon=True)
         self.receiver.start()
         self.ws.send(json.dumps(self.task_request(), ensure_ascii=False))
@@ -83,6 +95,29 @@ class GummyConnection:
         emit({"event": "ready", "task_id": self.task_id})
         self.heartbeat = runtime_safety.Heartbeat(emit)
         self.heartbeat.start()
+        interval = float(os.environ.get("LIVE_INTERPRETER_WS_PING", "20") or 0)
+        if interval > 0:
+            self.pinger = threading.Thread(target=self._ping_loop, args=(interval,), daemon=True)
+            self.pinger.start()
+
+    def _ping_loop(self, interval: float) -> None:
+        """Send WebSocket pings so NAT/LB idle timers do not reap the socket."""
+        while not self.finished.wait(interval):
+            if self.failed.is_set():
+                return
+            try:
+                self.ws.ping("live-interpreter")
+            except Exception:
+                return
+
+    def _close_info(self) -> tuple[Optional[int], str]:
+        frame = getattr(self.ws, "close_frame", None)
+        if frame is None:
+            return self.close_code, self.close_reason
+        data = getattr(frame, "data", b"") or b""
+        if len(data) >= 2:
+            return int.from_bytes(data[:2], "big"), data[2:].decode("utf-8", errors="replace")
+        return self.close_code, self.close_reason
 
     def task_request(self) -> Dict[str, object]:
         return {
@@ -112,19 +147,28 @@ class GummyConnection:
                 continue
             except Exception as exc:
                 if not self.finished.is_set():
-                    self.error = str(exc)
+                    code, reason = self._close_info()
+                    self.close_code, self.close_reason = code, reason
+                    self.error = f"{type(exc).__name__}: {exc}"
                     self.failed.set()
                     self.finished.set()
                     self.started.set()
-                    emit({"event": "error", "message": self.error})
+                    emit({"event": "error", "code": code, "reason": reason,
+                          "message": self.error})
                 return
             if not raw:
                 if not self.finished.is_set():
-                    self.error = "WebSocket closed by remote endpoint"
+                    code, reason = self._close_info()
+                    self.close_code, self.close_reason = code, reason
+                    self.error = (
+                        f"WebSocket closed by remote endpoint"
+                        + (f" (code {code} {reason})" if code is not None else "")
+                    )
                     self.failed.set()
                     self.finished.set()
                     self.started.set()
-                    emit({"event": "error", "message": self.error})
+                    emit({"event": "error", "code": code, "reason": reason,
+                          "message": self.error})
                 return
             try:
                 message = json.loads(raw)
@@ -219,6 +263,8 @@ class GummyConnection:
             except Exception:
                 pass
         self.finished.set()
+        if self.pinger is not None:
+            self.pinger.join(timeout=1)
         try:
             self.ws.close()
         except Exception:

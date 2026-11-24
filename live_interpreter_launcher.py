@@ -983,6 +983,11 @@ class Launcher:
         if selected_engine in {"qwen3.5-live", "qwen3.8-live"} and not self.aliyun_workspace_id.get().strip():
             messagebox.showwarning(APP_TITLE, "Qwen LiveTranslate 还需要填写 Workspace ID。")
             return False
+        if selected_engine == "qwen3.1-audio" and not self.aliyun_workspace_id.get().strip():
+            self.add_log(
+                "提示：Qwen3.1 未填 Workspace ID，将走公共域名 dashscope.aliyuncs.com；"
+                "官方建议用业务空间专属域名，长连接更稳。"
+            )
         try:
             port = int(self.port.get() or "8765")
         except ValueError:

@@ -2397,6 +2397,10 @@ def cloud_stream_loop(
         print("Missing Alibaba Cloud Workspace ID.", file=sys.stderr, flush=True)
         stop_event.set()
         return
+    if is_qwen_asr and not args.aliyun_workspace_id.strip():
+        print("Qwen3.1 is using the shared dashscope.aliyuncs.com endpoint; "
+              "fill Workspace ID for the workspace-specific (recommended, more stable) endpoint.",
+              file=sys.stderr, flush=True)
     if not getattr(sys, "frozen", False) and not worker_path.exists():
         state.set_status(f"{engine_name} worker missing")
         print(f"{engine_name} worker not found: {worker_path}", file=sys.stderr, flush=True)

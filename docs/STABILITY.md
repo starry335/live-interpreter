@@ -34,6 +34,30 @@ Windows 进程退出码 `4294967295` 等于 `-1`。PyInstaller 打包的程序�
 采样点起新会话，后续事件的 `sentence_id` 加 `s{n}-` 前缀，`begin_time/end_time`
 加上已喂音频的偏移，评测时间轴保持连续。
 
+## 3.1 掉线到底是什么
+
+实测到的错误是 **TCP 连接被断开**，不是模型返回 `task-failed`，也不是识别任务被服务端拒绝：
+
+- `websocket-client` 的 `recv()` 返回空，底层是 `WebSocketConnectionClosedException("Connection to remote host was lost.")`；
+- 没有 `task-failed` 的 error code，也没有服务端返回的识别错误；
+- 同一台机器上 Paraformer 也出现过同样的 “Connection to remote host was lost.”，所以不是 3.1 模型独有的问题。
+
+官方对 `qwen-audio-3.1-asr-flash-streaming` 的说明是：**音频流无时长限制，但受网络稳定性和会话保持策略影响**，并明确推荐使用业务空间专属域名
+`wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com`，说它“性能更好、稳定性更高”。
+不填 Workspace ID 时我们走的是公共地址 `dashscope.aliyuncs.com`；这是目前最可疑的
+环境因素，而不是模型本身。
+
+本轮补了三件事：
+
+1. 有 Workspace ID 时走专属域名；没有时在日志里明确提示“公共域名，长连接更容易被重置”。
+2. WebSocket 层每 20 秒发一次 ping，并打开 TCP keepalive（30 秒空闲 / 5 秒探测），防止 NAT / LB 空闲回收。
+3. 断开时记录 close code / reason（如果有），并保留 `cloud_recovery.log`，下次能区分“服务端主动关闭”“网络 EOF”“代理重置”。
+
+全量 gold-v0.3 的 3.1 400ms 跑法 32 条 0 次 worker 坏退出；300ms 跑法在 16.5 分钟
+clip 的 955 秒掉过一次；41 分钟 Paraformer+qwen3.8-flash 是 0 次。**掉线是间歇的，
+不是每个会话都发生**。如果换成专属域名 + keepalive 后仍偶发，再看 close code 决定
+是否要做“空闲时主动轮换会话”。
+
 ## 引擎选择
 
 launcher 和 backend 共用一套云端引擎集合；`qwen3.1-audio` 在 Edge 标签页音频下
