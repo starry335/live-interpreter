@@ -309,6 +309,12 @@ class Launcher:
         for name in BOOL_SETTINGS:
             if type(saved.get(name)) is bool:
                 getattr(self, name).set(saved[name])
+        if saved.get("settings_version") != 2:
+            # Old installs saved the previous ICL-on default. 0.4.x is
+            # precision-first, so migrate once; the user can turn it back on.
+            if self.icl_enabled.get():
+                self.icl_enabled.set(False)
+                self.add_log("旧配置的 ICL 已关闭（精确优先默认）；需要时在界面重新打开。")
         self._key_blob = saved.get("api_key_dpapi", "") if isinstance(saved.get("api_key_dpapi", ""), str) else ""
         if "api_key_dpapi" in saved:
             try:
@@ -337,6 +343,7 @@ class Launcher:
             return True
         try:
             values = {name: getattr(self, name).get() for name in (*STRING_SETTINGS, *BOOL_SETTINGS)}
+            values["settings_version"] = 2
             key = self.aliyun_api_key.get()
             # Reuse the existing blob if the key did not change, including a blob
             # that could not be decrypted after moving the settings to another user.

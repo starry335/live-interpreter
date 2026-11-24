@@ -42,8 +42,9 @@ Windows 进程退出码 `4294967295` 等于 `-1`。PyInstaller 打包的程序�
 - 没有 `task-failed` 的 error code，也没有服务端返回的识别错误；
 - 同一台机器上 Paraformer 也出现过同样的 “Connection to remote host was lost.”，所以不是 3.1 模型独有的问题。
 
-官方对 `qwen-audio-3.1-asr-flash-streaming` 的说明是：**音频流无时长限制，但受网络稳定性和会话保持策略影响**，并明确推荐使用业务空间专属域名
-`wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com`，说它“性能更好、稳定性更高”。
+官方对 `qwen-audio-3.1-asr-flash-streaming` 的说明是：**音频流无时长限制，但受网络稳定性和会话保持策略影响**（[官方样例](https://github.com/aliyun/alibabacloud-bailian-speech-demo)），并明确推荐使用业务空间专属域名
+`wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com`，说它“性能更好、稳定性更高”
+（[官方 SDK 文档](https://www.alibabacloud.com/help/en/model-studio/qwen-audio-asr-streaming-websocket-sdk-python)）。
 不填 Workspace ID 时我们走的是公共地址 `dashscope.aliyuncs.com`；这是目前最可疑的
 环境因素，而不是模型本身。
 
