@@ -168,6 +168,22 @@ class HotwordFileTests(unittest.TestCase):
         for term in config.mt_terms():
             self.assertFalse(kana.search(term.target), term)
 
+    def test_default_list_includes_requested_band_terms(self):
+        config = hotwords.load(hotwords.builtin_path())
+        asr = config.asr_terms()
+        for term in ("MyGO", "Mujica", "Ave Mujica", "AveMujica", "MewType",
+                     "ミュータイプ", "みゅーたいぷ", "夢限大", "無限大",
+                     "ヴィオラ", "ビオラ", "Viola"):
+            self.assertIn(term, asr, term)
+        self.assertEqual(config.translation_phrases()["MyGO"], "MyGO!!!!!")
+        self.assertEqual(config.translation_phrases()["Mujica"], "Mujica")
+        self.assertEqual(config.translation_phrases()["MewType"], "MewType")
+        self.assertEqual(config.translation_phrases()["ヴィオラ"], "薇欧拉")
+        # Punctuation is MT-only; the ASR surface stays clean.
+        self.assertNotIn("MyGO!!!!!", asr)
+        self.assertTrue(all("#" not in term for term in asr))
+        self.assertLessEqual(len(config.mt_terms()), 200)
+
     def test_invalid_files_fail_fast(self):
         with self.assertRaises(hotwords.HotwordError):
             hotwords.load(self.root / "missing.txt")
