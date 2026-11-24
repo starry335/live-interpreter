@@ -207,9 +207,11 @@ class HotwordFileTests(unittest.TestCase):
         config = hotwords.load(hotwords.builtin_path())
         asr = config.asr_terms()
         for term in ("MyGO", "Mujica", "Ave Mujica", "AveMujica", "MewType",
-                     "ミュータイプ", "みゅーたいぷ", "夢限大", "無限大",
-                     "ヴィオラ", "ビオラ", "Viola"):
+                     "ミュータイプ", "みゅーたいぷ", "夢限大", "夢限大みゅーたいぷ",
+                     "むげんだいみゅーたいぷ", "ヴィオラ", "ビオラ", "Viola"):
             self.assertIn(term, asr, term)
+        # The bare common word 無限大 must not be forced to the band name.
+        self.assertNotIn("無限大", asr)
         self.assertEqual(config.translation_phrases()["MyGO"], "MyGO")
         self.assertEqual(config.translation_phrases()["Mujica"], "Mujica")
         self.assertEqual(config.translation_phrases()["MewType"], "MewType")
