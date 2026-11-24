@@ -56,9 +56,7 @@ class IclToggleTests(unittest.TestCase):
         app = self.make_app()
         self.assertEqual(app.asr_engine.get(), "paraformer-mt")
         self.assertEqual(app.mt_model.get(), "qwen3.8-max")
-        self.assertFalse(app.icl_enabled.get())
         app.update_model_controls()
-        self.assertNotEqual(str(app.icl_check["state"]), "disabled")
         self.enable_frozen(app)
         command = app.command()
         self.assertEqual(command[command.index("--mt-mode") + 1], "reference")
@@ -84,31 +82,37 @@ class IclToggleTests(unittest.TestCase):
         self.assertTrue(command[command.index("--hotwords") + 1].endswith("yumemita_bangdream_strict.txt"))
         self.assertEqual(command[command.index("--mt-mode") + 1], "reference")
 
-    def test_icl_is_off_by_default_and_can_be_switched_on(self):
+    def test_no_icl_toggle_and_always_reference_prompt(self):
         app = self.make_app()
+        self.assertFalse(hasattr(app, "icl_check"))
+        self.assertFalse(hasattr(app, "icl_enabled"))
         app.asr_engine.set("paraformer-mt")
         app.mt_model.set("qwen3.8-max")
-        self.assertFalse(app.icl_enabled.get())
         self.enable_frozen(app)
         command = app.command()
         self.assertEqual(command[command.index("--mt-mode") + 1], "reference")
         self.assertNotIn("--hotword-cards", command)
 
-        app.icl_enabled.set(True)
-        command = app.command()
-        self.assertEqual(command[command.index("--mt-mode") + 1], "icl")
-        self.assertIn("--hotword-cards", command)
-
-    def test_qwen_mt_models_disable_the_toggle(self):
+    def test_hotword_editor_shows_the_currently_loaded_external_file(self):
         app = self.make_app()
-        app.asr_engine.set("paraformer-mt")
-        app.mt_model.set("qwen-mt-plus")
-        app.update_model_controls()
-        self.assertEqual(str(app.icl_check["state"]), "disabled")
+        external = self.directory / "custom_hotwords.txt"
+        external.write_text("[hotwords]\nカスタム => 自定义\n", encoding="utf-8")
+        app.hotwords.set(str(external))
+        app.show_hotword_editor()
+        try:
+            texts = app._hotword_editor_texts
+            self.assertIn("カスタム => 自定义", texts["hotwords"].get("1.0", "end"))
+        finally:
+            app.hotword_editor_window.destroy()
 
-        app.mt_model.set("qwen3.8-max")
-        app.update_model_controls()
-        self.assertNotEqual(str(app.icl_check["state"]), "disabled")
+    def test_hotword_sections_have_titles_and_descriptions(self):
+        self.assertEqual(len(launcher.HOTWORD_SECTIONS), 5)
+        for section, title, description in launcher.HOTWORD_SECTIONS:
+            self.assertTrue(section)
+            self.assertTrue(title)
+            self.assertGreater(len(description), 10)
+        self.assertIn("hotwords", [item[0] for item in launcher.HOTWORD_SECTIONS])
+        self.assertIn("asr-warm", [item[0] for item in launcher.HOTWORD_SECTIONS])
 
     def test_qwen_audio_3_1_engine_builds_the_right_command(self):
         app = self.make_app()
@@ -139,7 +143,6 @@ class IclToggleTests(unittest.TestCase):
         app = self.make_app()
         self.assertEqual(app.asr_engine.get(), "paraformer-mt")
         self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
-        self.assertFalse(app.icl_enabled.get())
 
     def test_043_migrates_to_3_1_when_workspace_is_set(self):
         launcher_settings.save(self.directory / "settings.json", {

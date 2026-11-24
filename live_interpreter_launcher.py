@@ -25,6 +25,21 @@ import runtime_safety
 
 APP_VERSION = "0.4.3"
 APP_TITLE = f"Live Interpreter v{APP_VERSION}"
+
+# The hotword editor groups entries by the same sections the file format uses.
+# (section, tab title, one-line explanation)
+HOTWORD_SECTIONS = (
+    ("hotwords", "热词（识别+翻译）",
+     "这些词会同时进入 ASR 词表和翻译术语表；适合人名、乐队名、固定译名。格式：原文 => 译文。"),
+    ("aliases", "别名（只改译文）",
+     "只在翻译阶段替换成目标写法，不送 ASR；适合 ASR 常见错写、异体写法。格式：原文 => 译文。"),
+    ("asr", "仅识别（ASR-only）",
+     "只进 ASR 词表，不强制翻译；适合敬称、口头称呼。格式：每行一个原文。"),
+    ("asr-warm", "弱提示（低权重）",
+     "低权重识别提示，只帮 ASR 听出来，不保证译名；适合容易漏的短词。格式：每行一个原文。"),
+    ("forbidden", "禁转（输出改写）",
+     "译文里出现左边写法就改成右边；适合纠正固定错译。格式：错写 => 正确写法。"),
+)
 STRING_SETTINGS = (
     "audio_device", "source_language", "target_language", "asr_engine", "mt_model",
     "aliyun_workspace_id", "aliyun_region", "gummy_max_end_silence", "chunk_seconds",
@@ -32,7 +47,7 @@ STRING_SETTINGS = (
     "work_dir", "hotwords",
 )
 BOOL_SETTINGS = ("overlay_enabled", "overlay_show_source", "record_screen", "translate_enabled",
-                 "visual_enabled", "icl_enabled")
+                 "visual_enabled")
 ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr_py38"))
 ENV_PYTHON = ENV_ROOT / "python.exe"
 FFMPEG = ENV_ROOT / "Library" / "bin" / "ffmpeg.exe"
@@ -51,18 +66,15 @@ MODEL_PRICING_URL = "https://help.aliyun.com/zh/model-studio/model-pricing"
 # Beijing standard prices (CNY / million text tokens), checked 2026-10-25.
 # (model, label, input_price, output_price, input_tokens, output_tokens)
 # Token counts follow the 887 s reference sample with context turned off:
-# 9,390 input / 2,008 output; the ICL rows use the measured +44% prompt growth.
+# 9,390 input / 2,008 output; reference prompt only.
 MT_PRICES = (
     ("qwen-mt-lite", "qwen-mt-lite", 0.60, 1.60, 9390, 2008),
     ("qwen-mt-flash", "qwen-mt-flash", 0.70, 1.95, 9390, 2008),
     ("qwen-mt-plus", "qwen-mt-plus", 1.80, 5.40, 9390, 2008),
     ("qwen3.8-flash", "qwen3.8-flash", 0.80, 2.70, 9390, 2008),
     ("qwen3.8-max", "qwen3.8-max", 12.00, 36.00, 9390, 2008),
-    ("qwen3.8-max", "qwen3.8-max + ICL", 12.00, 36.00, 13527, 2008),
     ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（忙时）", 2.00, 8.00, 9390, 2008),
-    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（忙时）+ ICL", 2.00, 8.00, 13527, 2008),
     ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（闲时）", 1.00, 4.00, 9390, 2008),
-    ("deepseek-v4.1-flash-1017", "deepseek-v4.1-flash-1017（闲时）+ ICL", 1.00, 4.00, 13527, 2008),
 )
 
 # (engine, label, cny_per_hour, note)
@@ -265,7 +277,6 @@ class Launcher:
         self.target_language = StringVar(value="Chinese")
         self.asr_engine = StringVar(value=os.environ.get("LIVE_INTERPRETER_ASR_ENGINE", "paraformer-mt"))
         self.mt_model = StringVar(value=os.environ.get("LIVE_INTERPRETER_MT_MODEL", "qwen3.8-max"))
-        self.icl_enabled = BooleanVar(value=False)
         self.aliyun_api_key = StringVar(value=os.environ.get("DASHSCOPE_API_KEY", ""))
         self.aliyun_workspace_id = StringVar(
             value=os.environ.get("DASHSCOPE_WORKSPACE_ID", "")
@@ -312,14 +323,12 @@ class Launcher:
         if saved.get("settings_version", 0) < 4:
             # 0.4.3: 3.1 + 500 ms is the quality default when a workspace is
             # configured (dedicated endpoint + keepalive).  Without one, stay
-            # on the stable Paraformer profile.  ICL stays off either way.
+            # on the stable Paraformer profile.
             raw_workspace = self.aliyun_workspace_id.get().strip()
             normalized = hotwords.normalize_workspace_id(raw_workspace)
             if raw_workspace and normalized != raw_workspace:
                 self.aliyun_workspace_id.set(normalized)
                 self.add_log(f"Workspace ID 已自动规范为 {normalized}（只保留 ws-...）。")
-            if self.icl_enabled.get():
-                self.icl_enabled.set(False)
             if self.aliyun_workspace_id.get().strip():
                 self.asr_engine.set("qwen3.1-audio")
                 self.gummy_max_end_silence.set("500")
@@ -471,10 +480,6 @@ class Launcher:
         )
         self.mt_combo.pack(side=LEFT, fill="x", expand=True)
         ttk.Button(mt_row, text="收费对比", command=self.show_model_pricing).pack(side=LEFT, padx=(8, 0))
-        self.icl_check = ttk.Checkbutton(
-            mt_row, text="热词小抄 (ICL)", variable=self.icl_enabled, command=self.schedule_settings_save,
-        )
-        self.icl_check.pack(side=LEFT, padx=(8, 0))
 
         hotword_row = ttk.Frame(cloud_box)
         hotword_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(7, 0))
@@ -482,6 +487,7 @@ class Launcher:
         ttk.Entry(hotword_row, textvariable=self.hotwords).pack(side=LEFT, fill="x", expand=True)
         ttk.Button(hotword_row, text="选择", command=self.choose_hotwords).pack(side=LEFT, padx=(8, 0))
         ttk.Button(hotword_row, text="恢复默认", command=lambda: self.hotwords.set("")).pack(side=LEFT, padx=(6, 0))
+        ttk.Button(hotword_row, text="检查热词", command=self.show_hotword_editor).pack(side=LEFT, padx=(6, 0))
         ttk.Label(hotword_row, text="留空：内置词表＋个人记忆").pack(side=LEFT, padx=(8, 0))
 
         small = ttk.Frame(settings)
@@ -601,6 +607,159 @@ class Launcher:
         ttk.Button(buttons, text="保存", command=save).pack(side=LEFT)
         ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=RIGHT)
 
+    def show_hotword_editor(self) -> None:
+        """Open a category-based editor for the hotword file actually in use."""
+        existing = getattr(self, "hotword_editor_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        raw_path = self.hotwords.get().strip()
+        path = Path(raw_path).expanduser() if raw_path else hotwords.builtin_path()
+        if not path.exists():
+            messagebox.showerror(APP_TITLE, f"热词表不存在：\n{path}")
+            return
+        try:
+            config = hotwords.load(str(path))
+        except hotwords.HotwordError as exc:
+            messagebox.showerror(APP_TITLE, str(exc))
+            return
+
+        dialog = self.hotword_editor_window = Toplevel(self.root)
+        dialog.title(f"检查热词 · {path.name}")
+        dialog.geometry("940x700")
+        dialog.minsize(820, 600)
+        dialog.transient(self.root)
+
+        ttk.Label(
+            dialog,
+            text=f"当前加载的词表：{path}\n"
+                 "下面就是这个文件实际生效的内容。保存为个人词表后，下次启动同传生效。",
+            wraplength=890, justify=LEFT,
+        ).pack(anchor="w", padx=14, pady=(12, 8))
+
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill=BOTH, expand=True, padx=14)
+
+        initial = {
+            "hotwords": [f"{term.source} => {term.target}" for term in config.pairs],
+            "aliases": [f"{term.source} => {term.target}" for term in config.aliases],
+            "asr": list(config.asr_only),
+            "asr-warm": list(config.asr_warm),
+            "forbidden": [f"{term.source} => {term.target}" for term in config.forbidden],
+        }
+        editors = {}
+        for section, title, description in HOTWORD_SECTIONS:
+            tab = ttk.Frame(notebook)
+            notebook.add(tab, text=title)
+            ttk.Label(tab, text=description, wraplength=860, justify=LEFT).pack(
+                anchor="w", padx=10, pady=(8, 4)
+            )
+            box = ttk.Frame(tab)
+            box.pack(fill=BOTH, expand=True, padx=10, pady=(0, 8))
+            editor = Text(box, wrap="word", height=10, undo=True)
+            scroll = ttk.Scrollbar(box, orient="vertical", command=editor.yview)
+            editor.configure(yscrollcommand=scroll.set)
+            editor.pack(side=LEFT, fill=BOTH, expand=True)
+            scroll.pack(side=RIGHT, fill="y")
+            editor.insert("1.0", "\n".join(initial[section]))
+            editors[section] = editor
+        self._hotword_editor_texts = editors
+
+        footer = ttk.Frame(dialog)
+        footer.pack(fill="x", padx=14, pady=(4, 12))
+        status = ttk.Label(footer, text="", wraplength=600)
+        status.pack(side=LEFT)
+
+        def compose() -> str:
+            lines = ["# Live Interpreter hotwords (edited in launcher)", ""]
+            for section, title, description in HOTWORD_SECTIONS:
+                lines.append(f"[{section}]")
+                lines.append(f"# {title}：{description}")
+                for raw in editors[section].get("1.0", "end-1c").splitlines():
+                    entry = raw.strip()
+                    if entry and not entry.startswith("#"):
+                        lines.append(entry)
+                lines.append("")
+            return "\n".join(lines) + "\n"
+
+        def validate(text: str):
+            import tempfile
+
+            probe = Path(tempfile.gettempdir()) / "li_hotwords_editor_check.txt"
+            probe.write_text(text, encoding="utf-8")
+            return hotwords.load(str(probe))
+
+        def check() -> None:
+            try:
+                probe = validate(compose())
+            except (OSError, ValueError, hotwords.HotwordError) as exc:
+                messagebox.showerror(APP_TITLE, f"词表检查失败：\n{exc}", parent=dialog)
+                return
+            counts = []
+            for section, title, _description in HOTWORD_SECTIONS:
+                entries = [
+                    line for line in editors[section].get("1.0", "end-1c").splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                ]
+                counts.append(f"{title}：{len(entries)} 条")
+            warning_text = "\n".join(probe.warnings) if probe.warnings else "无"
+            messagebox.showinfo(
+                "热词检查",
+                "当前文件：" + str(path) + "\n\n"
+                + "\n".join(counts)
+                + f"\n\n解析结果：ASR {len(probe.asr_terms())} 词 / MT {len(probe.mt_terms())} 词"
+                + f"\n提示：{warning_text}",
+                parent=dialog,
+            )
+
+        def save_to(target: Path) -> bool:
+            if self.is_running():
+                messagebox.showwarning(APP_TITLE, "请先停止同传，再保存词表。", parent=dialog)
+                return False
+            text = compose()
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+                probe = hotwords.load(str(target))
+            except (OSError, ValueError, hotwords.HotwordError) as exc:
+                messagebox.showerror(APP_TITLE, f"保存失败：\n{exc}", parent=dialog)
+                return False
+            self.hotwords.set(str(target))
+            self.schedule_settings_save()
+            self.add_log(
+                f"热词表已保存：{target}（ASR {len(probe.asr_terms())} / MT {len(probe.mt_terms())}）；"
+                "下次启动同传生效。"
+            )
+            for warning in probe.warnings:
+                self.add_log(f"热词提示：{warning}")
+            dialog.destroy()
+            return True
+
+        def save_current() -> None:
+            custom = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "LiveInterpreter" / "hotwords_custom.txt"
+            target = Path(raw_path).expanduser() if raw_path else custom
+            if target.resolve() == hotwords.builtin_path().resolve():
+                target = custom
+            save_to(target)
+
+        def save_as() -> None:
+            custom = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "LiveInterpreter" / "hotwords_custom.txt"
+            chosen = filedialog.asksaveasfilename(
+                parent=dialog,
+                title="保存热词表",
+                initialdir=str(custom.parent),
+                initialfile=custom.name,
+                defaultextension=".txt",
+                filetypes=[("热词表", "*.txt"), ("所有文件", "*.*")],
+            )
+            if chosen:
+                save_to(Path(chosen))
+
+        ttk.Button(footer, text="检查", command=check).pack(side=RIGHT, padx=(6, 0))
+        ttk.Button(footer, text="取消", command=dialog.destroy).pack(side=RIGHT, padx=(6, 0))
+        ttk.Button(footer, text="另存为…", command=save_as).pack(side=RIGHT, padx=(6, 0))
+        ttk.Button(footer, text="保存为个人词表", command=save_current).pack(side=RIGHT)
+
     def choose_hotwords(self) -> None:
         chosen = filedialog.askopenfilename(title="选择外部热词表（优先于已保存记忆）",
                                           initialdir=str(install_root() / "hotwords"),
@@ -628,9 +787,6 @@ class Launcher:
         self.visual_button.configure(state="disabled" if is_paraformer_mt or is_qwen_asr else "normal")
         is_text_mt = self.asr_engine.get() in {"paraformer-mt", "qwen3.1-audio"}
         self.mt_combo.configure(state="readonly" if is_text_mt else "disabled")
-        if hasattr(self, "icl_check"):
-            supports_icl = is_text_mt and not self.mt_model.get().startswith("qwen-mt-")
-            self.icl_check.configure(state="normal" if supports_icl else "disabled")
         if is_qwen38:
             self.source_language.set("auto")
         self.source_combo.configure(state="disabled" if is_qwen38 else "readonly")
@@ -638,7 +794,7 @@ class Launcher:
         self.model_note.configure(text=(
             "Paraformer：仅北京；翻译模型可选；通用大模型关闭深度思考。"
             if is_paraformer_mt else
-            "Qwen3.1 流式识别：句末静音建议 500 ms（默认，少碎句）；400 ms 更灵敏但更碎。翻译模型与热词小抄同上。"
+            "Qwen3.1 流式识别：句末静音建议 500 ms（默认，少碎句）；400 ms 更灵敏但更碎。翻译模型可选。"
             if self.asr_engine.get() == "qwen3.1-audio" else
             "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
         ))
@@ -694,7 +850,7 @@ class Launcher:
             asr_table.insert("", END, iid=f"asr{index}", values=(label, f"{price:.3f}", note))
         asr_table.pack(fill="x")
         for note in (
-            "统一样本：887 秒音频、9,390 输入 Token、2,008 输出 Token（上下文关闭）；ICL 行按实测 +44% 输入。",
+            "统一样本：887 秒音频、9,390 输入 Token、2,008 输出 Token（上下文关闭）。",
             "小时费用仅供同 Token 比较；通用模型含上下文，实际用量可能更高。未计免费额度、缓存优惠，以阿里云账单为准。",
             "DeepSeek 忙时 08:00–22:00，闲时 22:00–次日 08:00（北京时间）；两行是同一模型，价格自动按时段生效。",
         ):
@@ -862,11 +1018,7 @@ class Launcher:
         if not self.translate_enabled.get():
             cmd.extend(["--translation-engine", "none"])
         if asr_engine in {"paraformer-mt", "qwen3.1-audio"}:
-            mode = "icl" if self.icl_enabled.get() else "reference"
-            cmd.extend(["--mt-model", self.mt_model.get() or "qwen3.8-max", "--mt-mode", mode])
-            cards = hotwords.builtin_cards_path()
-            if mode == "icl" and cards.exists():
-                cmd.extend(["--hotword-cards", str(cards)])
+            cmd.extend(["--mt-model", self.mt_model.get() or "qwen3.8-max", "--mt-mode", "reference"])
         external_hotwords = self.hotwords.get().strip()
         if external_hotwords:
             resolved = Path(external_hotwords).expanduser().resolve()
