@@ -81,6 +81,10 @@ DEFAULT_WEIGHT = 4
 # full name; short common-word homophones are never trusted.
 CORE_TARGETS = {"阿拉蕾", "野乃花", "律", "都子", "由乃"}
 NAME_PARTICLES = set("はがをにでとも のねよかへや")
+# Colloquial tails that can follow a bare name in ASR text without a space:
+# 律って, 律ばっかり, 律してる, 律ノリ, 律つか.  They are not part of the name,
+# but they must not make the name look like a verb stem (振りつけ).
+BARE_NAME_TAILS = ("って", "ば", "し", "つ", "ノ", "った", "れば", "ちゃ", "たら")
 HONORIFICS = ("ちゃん", "さん", "くん", "様", "さま", "ちん", "たん", "氏", "っち")
 WEAK_SURFACES = {
     "ゆめみた", "夢見た", "ゆめみたー", "夢見たー",
@@ -150,6 +154,33 @@ class HotwordError(ValueError):
 
 def builtin_path() -> Path:
     return Path(__file__).resolve().parent / "hotwords" / "yumemita_bangdream_strict.txt"
+
+
+def normalize_workspace_id(value: str) -> str:
+    """Accept a bare Workspace ID or a pasted workspace URL.
+
+    Users often paste ``https://ws-xxx.cn-beijing.maas.aliyuncs.com/api/v1``
+    into the launcher.  The API needs only the first label (``ws-xxx``);
+    passing the URL to the workers makes their URL construction invalid and
+    the backend exits at startup.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        from urllib.parse import urlsplit
+
+        host = urlsplit(text).hostname or ""
+        if not host.endswith("aliyuncs.com"):
+            return ""
+        text = host
+    if "." in text:
+        text = text.split("/", 1)[0]
+        if not text.endswith("aliyuncs.com"):
+            return ""
+        text = text.split(".", 1)[0]
+    text = text.strip().strip("/")
+    return text if re.fullmatch(r"[A-Za-z0-9-]+", text) else ""
 
 
 def expanded_path() -> Path:
@@ -232,13 +263,12 @@ class HotwordConfig:
     def translation_phrases(self) -> Dict[str, str]:
         return {term.source: term.target for term in self.mt_terms()}
 
-    def _term_evidence_ok(self, term: Term, text: str) -> bool:
-        """Whether a matched surface is strong enough to name a person/band.
+    def _strong_surface(self, term: Term, text: str) -> bool:
+        """Written evidence strong enough to treat this surface as a name.
 
-        Strong: kanji/ASCII writing, long kana reading, an honorific, a known
-        nickname suffix, or a core-cast bare name followed by a case particle.
-        A bare そよ/たき followed by a comma or a sentence end is deliberately
-        weak; that is the precision-first rule that stops そよ -> 素世/小夜.
+        Kanji/ASCII writing, a long kana reading, an honorific, or a known
+        nickname suffix.  A bare 2-3 kana core name is intentionally excluded:
+        it is also the ASR spelling of an ordinary homophone.
         """
         source = term.source.strip()
         if not source:
@@ -263,18 +293,70 @@ class HotwordConfig:
             if any(search_text.startswith(honorific, end) for honorific in HONORIFICS):
                 return True
             start = search_text.find(source, start + 1)
-        # Core cast bare names are the subject of this stream; they are strong
-        # even without a following particle (the ASR often ends the fragment
-        # right after the name).  Non-core short names stay weak.
-        return term.target in CORE_TARGETS and source in search_text
+        return False
+
+    def _bare_occurrence_ok(self, text: str, source: str) -> bool:
+        """Whether a bare short name is a standalone word, not a substring.
+
+        2-mora kana names are also pieces of ordinary verbs: りつ in 振りつけ
+        (choreography), ありつ, きりつ.  A real bare mention is preceded by a
+        non-kana boundary and followed by a particle, honorific, punctuation
+        or the end of the fragment.
+        """
+        start = 0
+        while True:
+            index = text.find(source, start)
+            if index < 0:
+                return False
+            start = index + 1
+            before = text[index - 1] if index > 0 else ""
+            if (before and _KANA_RE.match(before)
+                    and before not in NAME_PARTICLES):
+                continue
+            after = text[index + len(source):]
+            if not after:
+                return True
+            if any(after.startswith(honorific) for honorific in HONORIFICS):
+                return True
+            if any(after.startswith(tail) for tail in BARE_NAME_TAILS):
+                return True
+            first = after[0]
+            if _KANA_RE.match(first) and first not in NAME_PARTICLES:
+                continue
+            return True
+
+    def _term_evidence_ok(self, term: Term, text: str,
+                          history: Iterable[str] = ()) -> bool:
+        """Whether a matched surface is strong enough to name a person/band.
+
+        A bare core-cast name (ゆの/りつ/みやこ/あられ/ののか) is not strong on
+        its own: the same kana is an ordinary word and the ASR emits it for
+        both readings.  It becomes eligible only when the same name appeared
+        with strong written evidence in a recent line (honorific, full name,
+        kanji).  That is the discourse evidence a 2-mora surface lacks.
+        """
+        if self._strong_surface(term, text):
+            return True
+        # Precision-first exception: the five core cast are the subject of the
+        # stream and are the product's headline hotwords.  The 2026-11 A/B of a
+        # context-only gate measured 58% vs 74% recall for <1pt charF1, so the
+        # bare-name exception stays; it must still be a standalone occurrence
+        # (振りつけ must not become 律).
+        source = term.source.strip()
+        return (bool(source)
+                and term.target in CORE_TARGETS
+                and self._bare_occurrence_ok(text, source))
 
     def select_mt_terms(self, text: str, limit: int = MAX_MT_TERMS_PER_REQUEST,
-                        strict: bool = True) -> List[Term]:
+                        strict: bool = True,
+                        history: Iterable[str] = ()) -> List[Term]:
         """Terms actually present in ``text``, longest source first.
 
         Qwen-MT degrades when dozens of unrelated terms are sent at once (and
         a short term such as ユノ can win over the longer 戦国ユーノ), so each
         request only carries the terms that can occur in this sentence.
+        ``history`` is the handful of previous source finals, used only to
+        re-admit a bare core-cast name after a strong mention.
         """
         haystack = (text or "").casefold()
         if not haystack:
@@ -285,7 +367,8 @@ class HotwordConfig:
             and term.source.casefold() in haystack
         ]
         if strict:
-            matched = [term for term in matched if self._term_evidence_ok(term, text or "")]
+            matched = [term for term in matched
+                       if self._term_evidence_ok(term, text or "", history)]
         matched.sort(key=lambda term: (-len(term.source), term.source))
         # Drop a shorter term when a longer matched term covers it (ゆのち
         # wins over ゆの, 戦国ユーノ wins over ユノ); otherwise the model can

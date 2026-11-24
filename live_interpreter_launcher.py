@@ -23,7 +23,7 @@ import launcher_settings
 import runtime_safety
 
 
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
 APP_TITLE = f"Live Interpreter v{APP_VERSION}"
 STRING_SETTINGS = (
     "audio_device", "source_language", "target_language", "asr_engine", "mt_model",
@@ -309,21 +309,25 @@ class Launcher:
         for name in BOOL_SETTINGS:
             if type(saved.get(name)) is bool:
                 getattr(self, name).set(saved[name])
-        if saved.get("settings_version", 0) < 3:
-            # Old installs saved the previous ICL-on default. 0.4.x is
-            # precision-first, so migrate once; the user can turn it back on.
+        if saved.get("settings_version", 0) < 4:
+            # 0.4.3: 3.1 + 500 ms is the quality default when a workspace is
+            # configured (dedicated endpoint + keepalive).  Without one, stay
+            # on the stable Paraformer profile.  ICL stays off either way.
+            raw_workspace = self.aliyun_workspace_id.get().strip()
+            normalized = hotwords.normalize_workspace_id(raw_workspace)
+            if raw_workspace and normalized != raw_workspace:
+                self.aliyun_workspace_id.set(normalized)
+                self.add_log(f"Workspace ID 已自动规范为 {normalized}（只保留 ws-...）。")
             if self.icl_enabled.get():
                 self.icl_enabled.set(False)
-                self.add_log("旧配置的 ICL 已关闭（精确优先默认）；需要时在界面重新打开。")
-        if saved.get("settings_version", 0) < 3 and self.asr_engine.get() in {
-            "qwen3.1-audio", "qwen-audio-stream",
-        }:
-            # Paraformer is the stable default from 0.4.2 onward.
-            self.asr_engine.set("paraformer-mt")
-            if str(self.gummy_max_end_silence.get()).strip() in {"200", "300", "400"}:
+            if self.aliyun_workspace_id.get().strip():
+                self.asr_engine.set("qwen3.1-audio")
                 self.gummy_max_end_silence.set("500")
-            self.aliyun_region.set("beijing")
-            self.add_log("默认识别引擎已切换为 Paraformer（稳定档，500ms）；需要 3.1 时可在下拉框手动选回。")
+                self.add_log("0.4.3：检测到 Workspace ID，默认使用 3.1 + 500ms（质量档）。")
+            else:
+                self.asr_engine.set("paraformer-mt")
+                self.gummy_max_end_silence.set("500")
+                self.add_log("0.4.3：未填 Workspace ID，默认 Paraformer + 500ms（稳定档）。")
         self._key_blob = saved.get("api_key_dpapi", "") if isinstance(saved.get("api_key_dpapi", ""), str) else ""
         if "api_key_dpapi" in saved:
             try:
@@ -352,7 +356,7 @@ class Launcher:
             return True
         try:
             values = {name: getattr(self, name).get() for name in (*STRING_SETTINGS, *BOOL_SETTINGS)}
-            values["settings_version"] = 3
+            values["settings_version"] = 4
             key = self.aliyun_api_key.get()
             # Reuse the existing blob if the key did not change, including a blob
             # that could not be decrypted after moving the settings to another user.
@@ -621,10 +625,6 @@ class Launcher:
             self.visual_enabled.set(False)
         if is_qwen_asr:
             self.visual_enabled.set(False)
-        if self.asr_engine.get() == "qwen3.1-audio" and str(self.gummy_max_end_silence.get()).strip() in {"500", "300"}:
-            # 400 ms measured best balance of fragmentation / charF1 / first-zh
-            # on the full gold-v0.3 set; only change a default-looking value.
-            self.gummy_max_end_silence.set("400")
         self.visual_button.configure(state="disabled" if is_paraformer_mt or is_qwen_asr else "normal")
         is_text_mt = self.asr_engine.get() in {"paraformer-mt", "qwen3.1-audio"}
         self.mt_combo.configure(state="readonly" if is_text_mt else "disabled")
@@ -638,7 +638,7 @@ class Launcher:
         self.model_note.configure(text=(
             "Paraformer：仅北京；翻译模型可选；通用大模型关闭深度思考。"
             if is_paraformer_mt else
-            "Qwen3.1 流式识别：句末静音建议 400 ms（默认已切换）；翻译模型与热词小抄同上。"
+            "Qwen3.1 流式识别：句末静音建议 500 ms（默认，少碎句）；400 ms 更灵敏但更碎。翻译模型与热词小抄同上。"
             if self.asr_engine.get() == "qwen3.1-audio" else
             "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
         ))
@@ -813,7 +813,7 @@ class Launcher:
             "--gummy-max-end-silence",
             str(gummy_max_end_silence),
             "--aliyun-workspace-id",
-            self.aliyun_workspace_id.get().strip(),
+            hotwords.normalize_workspace_id(self.aliyun_workspace_id.get()),
             "--aliyun-region",
             self.aliyun_region.get() or "beijing",
             "--chunk-seconds",
@@ -982,6 +982,18 @@ class Launcher:
             messagebox.showwarning(APP_TITLE, "请先选择音频设备。")
             return False
         selected_engine = self.asr_engine.get()
+        raw_workspace = self.aliyun_workspace_id.get().strip()
+        workspace_id = hotwords.normalize_workspace_id(raw_workspace)
+        if raw_workspace and not workspace_id:
+            messagebox.showerror(
+                APP_TITLE,
+                "Workspace ID 只填 ws-...（业务空间 ID），不要填完整 URL。\n"
+                "例如：https://ws-xxxx.cn-beijing.maas.aliyuncs.com/api/v1 只填 ws-xxxx。",
+            )
+            return False
+        if workspace_id != raw_workspace:
+            self.aliyun_workspace_id.set(workspace_id)
+            self.add_log(f"Workspace ID 已自动规范为 {workspace_id}（只保留 ws-...）。")
         if self.audio_device.get() == EDGE_TAB_LABEL and selected_engine not in CLOUD_ENGINES:
             messagebox.showwarning(
                 APP_TITLE,
@@ -1036,7 +1048,7 @@ class Launcher:
             api_key = self.aliyun_api_key.get().strip()
             if api_key:
                 env["DASHSCOPE_API_KEY"] = api_key
-            workspace_id = self.aliyun_workspace_id.get().strip()
+            workspace_id = hotwords.normalize_workspace_id(self.aliyun_workspace_id.get())
             if workspace_id:
                 env["DASHSCOPE_WORKSPACE_ID"] = workspace_id
             self.close_preview()

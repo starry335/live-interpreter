@@ -43,6 +43,7 @@ ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming"
 DEFAULT_MT_MODEL = "deepseek-v4.1-flash-1017"
 TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
 MT_ATTEMPTS = 3
+MT_TIMEOUT = 8
 HONORIFICS = ("ちゃん", "さん", "ちん", "たん", "くん", "様", "さま", "氏")
 LOGGER = logging.getLogger("qwen-asr-stream")
 
@@ -154,8 +155,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--asr-warm", action=argparse.BooleanOptionalAction, default=True,
                         help="Send [asr-warm] terms at weight 1; --no-asr-warm keeps the hot list only.")
     args = parser.parse_args(argv)
-    if args.workspace_id and not re.fullmatch(r"[A-Za-z0-9-]+", args.workspace_id):
-        parser.error("Workspace ID must contain only letters, digits and hyphens.")
+    raw_workspace = str(args.workspace_id or "").strip()
+    args.workspace_id = hotwords.normalize_workspace_id(raw_workspace)
+    if raw_workspace and not args.workspace_id:
+        parser.error("Workspace ID must be the bare ws-... id, not a full URL.")
     return args
 
 
@@ -368,7 +371,12 @@ class QwenASRStreamConnection(GummyConnection):
         final = bool(sentence.get("sentence_end"))
         if final and sentence_id in self.seen_sentences:
             return
+        history: List[str] = []
         if final:
+            # Snapshot the previous finals before this one is appended.  The
+            # name policy uses them to re-admit a bare core-cast name only
+            # after the same name was written strongly nearby.
+            history = list(self.source_history[-3:])
             if bool(getattr(self.args, "name_consistency", True)):
                 text = self._correct_name_consistency(text)
             else:
@@ -387,7 +395,9 @@ class QwenASRStreamConnection(GummyConnection):
             self.draft_state.pop(sentence_id, None)
             if self.args.translation_enabled:
                 try:
-                    self.pending.put_nowait(result)
+                    queued = dict(result)
+                    queued["_history"] = history
+                    self.pending.put_nowait(queued)
                     self.translation_queued += 1
                     emit({"event": "translation_queued", "sentence_id": sentence_id})
                 except queue.Full:
@@ -407,10 +417,13 @@ class QwenASRStreamConnection(GummyConnection):
         value = int(getattr(self.args, "icl_examples", 2))
         return None if value < 0 else max(0, value)
 
-    def translate(self, text: str, sentence_id: str = "") -> str:
+    def translate(self, text: str, sentence_id: str = "",
+                  history: Optional[List[str]] = None) -> str:
         if getattr(self.args, "correct_names", False) and self.hotword_config:
             text = self.hotword_config.correct_kana_surfaces(text)
-        terms = self.hotword_config.select_mt_terms(text) if self.hotword_config else []
+        recent = list(history) if history is not None else list(self.source_history[-3:])
+        terms = (self.hotword_config.select_mt_terms(text, history=recent)
+                 if self.hotword_config else [])
         warm_terms = []
         if bool(getattr(self.args, "warm_names", True)):
             warm_terms = [hotwords.Term(source, target) for source, target in warm_names.retrieve(text)]
@@ -459,20 +472,38 @@ class QwenASRStreamConnection(GummyConnection):
             # A bare subtitle is a few tokens cheaper than a JSON wrapper and
             # works with the same system prompt.
             user_content = text
-        body = {
-            "model": self.args.mt_model,
-            "enable_thinking": False,
-            "temperature": 0.2,
-            "max_tokens": 1024,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-        }
-        streaming = bool(getattr(self.args, "stream_translation", True))
-        if streaming:
-            body["stream"] = True
-            body["stream_options"] = {"include_usage": True}
+        if str(self.args.mt_model).startswith("qwen-mt-"):
+            # Qwen-MT is the cheap dedicated translation model.  It takes the
+            # DashScope translation_options payload, not a chat system prompt,
+            # and does not stream.
+            body = {
+                "model": self.args.mt_model,
+                "messages": [{"role": "user", "content": text}],
+                "translation_options": {
+                    "source_lang": self.args.source_language,
+                    "target_lang": self.args.target_language,
+                },
+            }
+            if terms:
+                body["translation_options"]["terms"] = [
+                    {"source": term.source, "target": term.target} for term in terms
+                ]
+            streaming = False
+        else:
+            body = {
+                "model": self.args.mt_model,
+                "enable_thinking": False,
+                "temperature": 0.2,
+                "max_tokens": 1024,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+            }
+            streaming = bool(getattr(self.args, "stream_translation", True))
+            if streaming:
+                body["stream"] = True
+                body["stream_options"] = {"include_usage": True}
         request = urllib.request.Request(
             self.translation_url,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -482,7 +513,7 @@ class QwenASRStreamConnection(GummyConnection):
         self.mt_requests += 1
         started = time.monotonic()
         if not streaming:
-            with urllib.request.urlopen(request, timeout=20, context=self.ssl_context) as response:
+            with urllib.request.urlopen(request, timeout=MT_TIMEOUT, context=self.ssl_context) as response:
                 data = json.loads(response.read())
             usage = data.get("usage") or {}
             self.input_tokens += int(usage.get("prompt_tokens") or 0)
@@ -511,7 +542,7 @@ class QwenASRStreamConnection(GummyConnection):
         last_emit = 0.0
         split = urlsplit(self.translation_url)
         connection = http.client.HTTPSConnection(
-            split.hostname, split.port or 443, timeout=30, context=self.ssl_context
+            split.hostname, split.port or 443, timeout=MT_TIMEOUT, context=self.ssl_context
         )
         try:
             connection.request(
@@ -639,7 +670,9 @@ class QwenASRStreamConnection(GummyConnection):
     def translate_draft(self, text: str, sentence_id: str = "") -> str:
         if getattr(self.args, "correct_names", False) and self.hotword_config:
             text = self.hotword_config.correct_kana_surfaces(text)
-        terms = self.hotword_config.select_mt_terms(text) if self.hotword_config else []
+        terms = (self.hotword_config.select_mt_terms(
+                     text, history=list(self.source_history[-3:]))
+                 if self.hotword_config else [])
         if terms and getattr(self.args, "mt_drop_aliases", False):
             alias_sources = {term.source for term in self.hotword_config.aliases}
             terms = [term for term in terms if term.source not in alias_sources]
@@ -671,7 +704,7 @@ class QwenASRStreamConnection(GummyConnection):
             method="POST",
         )
         self.draft_requests += 1
-        with urllib.request.urlopen(request, timeout=20, context=self.ssl_context) as response:
+        with urllib.request.urlopen(request, timeout=MT_TIMEOUT, context=self.ssl_context) as response:
             data = json.loads(response.read())
         usage = data.get("usage") or {}
         self.draft_input_tokens += int(usage.get("prompt_tokens") or 0)
@@ -747,7 +780,9 @@ class QwenASRStreamConnection(GummyConnection):
                 while attempt < MT_ATTEMPTS:
                     attempt += 1
                     try:
-                        translated = self.translate(str(result["source"]), sentence_id)
+                        translated = self.translate(
+                            str(result["source"]), sentence_id,
+                            list(result.get("_history") or []))
                         self.draft_cache.pop(sentence_id, None)
                         with self.final_lock:
                             self.finalized.add(sentence_id)
@@ -776,7 +811,10 @@ class QwenASRStreamConnection(GummyConnection):
                             self._translation_failed(result, reason)
                             break
                         time.sleep(0.25 * attempt)
-                    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                    except TimeoutError as exc:
+                        self._translation_failed(result, f"MT timeout after {MT_TIMEOUT}s: {exc}")
+                        break
+                    except (urllib.error.URLError, ConnectionError, OSError) as exc:
                         reason = f"{type(exc).__name__}: {exc}"
                         if attempt >= MT_ATTEMPTS:
                             self._translation_failed(result, reason)

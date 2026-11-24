@@ -139,7 +139,42 @@ class HotwordFileTests(unittest.TestCase):
     def test_single_character_surface_is_not_applied(self):
         config = hotwords.load(self.write("single.txt", "律 => 律\nりつ => 律\n"))
         self.assertEqual(config.select_mt_terms("旋律が好き"), [])
+        # Core cast bare names stay eligible (product headline hotwords); the
+        # context-only gate cost 16pt recall for <1pt charF1 in the A/B.
         self.assertEqual([t.source for t in config.select_mt_terms("りつが好き")], ["りつ"])
+
+    def test_normalize_workspace_id_accepts_url_or_bare(self):
+        url = "https://ws-5iw1srfwubsjj8t9.cn-beijing.maas.aliyuncs.com/api/v1"
+        self.assertEqual(hotwords.normalize_workspace_id(url), "ws-5iw1srfwubsjj8t9")
+        self.assertEqual(
+            hotwords.normalize_workspace_id("ws-abc.cn-beijing.maas.aliyuncs.com/api/v1"),
+            "ws-abc",
+        )
+        self.assertEqual(hotwords.normalize_workspace_id("ws-abc"), "ws-abc")
+        self.assertEqual(hotwords.normalize_workspace_id(""), "")
+        self.assertEqual(hotwords.normalize_workspace_id("https://example.com/api"), "")
+
+    def test_bare_core_name_must_be_a_standalone_word(self):
+        config = hotwords.load(self.write(
+            "names.txt", "ゆの => 由乃\nりつ => 律\nののか => 野乃花\n"))
+        # Particles/honorifics/end/punctuation after the name are fine.
+        self.assertEqual([t.source for t in config.select_mt_terms("ゆのから行きます")], ["ゆの"])
+        self.assertEqual([t.source for t in config.select_mt_terms("ゆの。")], ["ゆの"])
+        self.assertEqual([t.source for t in config.select_mt_terms("ののか")], ["ののか"])
+        # ASR has no spaces: a name often follows a particle.  Do not reject
+        # でもりつも / ちょっとりつは just because the previous char is kana.
+        self.assertEqual([t.source for t in config.select_mt_terms("でもりつも言ってないよ")], ["りつ"])
+        self.assertEqual([t.source for t in config.select_mt_terms("ちょっとりつは")], ["りつ"])
+        self.assertEqual([t.source for t in config.select_mt_terms("りつって笑う")], ["りつ"])
+        self.assertEqual([t.source for t in config.select_mt_terms("りつばっかり")], ["りつ"])
+        self.assertEqual(config.select_mt_terms("きりつ"), [])
+        self.assertEqual(config.select_mt_terms("こりつ"), [])
+        # Substrings of ordinary verbs are not names: 振りつけ, ありつ,
+        # ふりつけ, みやこののか.
+        self.assertEqual(config.select_mt_terms("振りつけ？"), [])
+        self.assertEqual(config.select_mt_terms("ふりつけ"), [])
+        self.assertEqual(config.select_mt_terms("ありつ"), [])
+        self.assertEqual(config.select_mt_terms("みやこののか"), [])
 
     def test_prompt_block_is_bounded(self):
         lines = "\n".join(f"語{i} => 词{i}" for i in range(300))

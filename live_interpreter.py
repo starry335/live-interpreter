@@ -806,16 +806,23 @@ def compose_live_subtitles(
     ]
     while len("\n".join(translated_parts)) > maximum_chars and len(translated_parts) > minimum_events:
         translated_parts.pop(0)
-    # Short consecutive lines read like broken sentences on screen.  Merge
-    # fragments into one paragraph until a sentence-ending punctuation mark;
-    # the first part still appears immediately and later parts are appended.
+    # Short consecutive lines read like broken sentences on screen.  Merge a
+    # short line into the previous paragraph even when it already ends with a
+    # sentence mark: ASR/MT punctuates every fragment, so requiring an
+    # unpunctuated tail made this loop a no-op (the 2026-11 fragmentation bug).
+    # A long, properly ended line still starts a new paragraph.
+    sentence_end = ("。", "！", "？", "!", "?")
     if len(translated_parts) >= 2:
         merged: List[str] = [translated_parts[0]]
         for part in translated_parts[1:]:
-            if merged[-1].endswith(("。", "！", "？", "!", "?")):
+            previous = merged[-1]
+            previous_body = previous.rstrip("。！？!?，,、 ")
+            if not previous_body:
+                merged[-1] = part
+            elif len(previous_body) >= 14 and previous.endswith(sentence_end):
                 merged.append(part)
             else:
-                merged[-1] = merged[-1].rstrip("，,、 ") + "，" + part
+                merged[-1] = previous_body + "，" + part.lstrip("，,、 ")
         translated = "\n".join(merged)
     elif translated_parts:
         translated = translated_parts[0]

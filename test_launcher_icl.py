@@ -68,12 +68,12 @@ class IclToggleTests(unittest.TestCase):
         hotwords_arg = command[command.index("--hotwords") + 1]
         self.assertTrue(hotwords_arg.endswith("yumemita_bangdream_strict.txt"))
 
-    def test_switching_to_3_1_uses_the_shorter_silence_default(self):
+    def test_switching_to_3_1_keeps_the_longer_silence_default(self):
         app = self.make_app()
         self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
         app.asr_engine.set("qwen3.1-audio")
         app.update_model_controls()
-        self.assertEqual(str(app.gummy_max_end_silence.get()), "400")
+        self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
 
     def test_qwen_audio_3_1_gets_the_builtin_hotword_list(self):
         app = self.make_app()
@@ -140,6 +140,24 @@ class IclToggleTests(unittest.TestCase):
         self.assertEqual(app.asr_engine.get(), "paraformer-mt")
         self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
         self.assertFalse(app.icl_enabled.get())
+
+    def test_043_migrates_to_3_1_when_workspace_is_set(self):
+        launcher_settings.save(self.directory / "settings.json", {
+            "settings_version": 3, "asr_engine": "paraformer-mt",
+            "gummy_max_end_silence": "400", "aliyun_workspace_id": "ws-test",
+        })
+        app = self.make_app()
+        self.assertEqual(app.asr_engine.get(), "qwen3.1-audio")
+        self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
+
+    def test_043_without_workspace_stays_on_paraformer(self):
+        launcher_settings.save(self.directory / "settings.json", {
+            "settings_version": 3, "asr_engine": "qwen3.1-audio",
+            "gummy_max_end_silence": "300", "aliyun_workspace_id": "",
+        })
+        app = self.make_app()
+        self.assertEqual(app.asr_engine.get(), "paraformer-mt")
+        self.assertEqual(str(app.gummy_max_end_silence.get()), "500")
 
     def test_legacy_engine_setting_is_migrated_to_paraformer(self):
         launcher_settings.save(self.directory / "settings.json", {"asr_engine": "qwen-audio-stream"})

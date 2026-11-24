@@ -27,6 +27,7 @@ ASR_MODEL = "paraformer-realtime-v2"
 MT_MODEL = "qwen-mt-lite"
 TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
 MT_ATTEMPTS = 3
+MT_TIMEOUT = 8
 HONORIFICS = ("ちゃん", "さん", "ちん", "たん", "くん", "様", "さま", "氏")
 MT_MODELS = (
     "qwen-mt-lite", "qwen-mt-flash", "qwen-mt-plus",
@@ -72,8 +73,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--vocabulary-weight", type=int, default=0,
                         help="Give every ASR term this weight (0 keeps the built-in default).")
     args = parser.parse_args(argv)
-    if args.workspace_id and not re.fullmatch(r"[A-Za-z0-9-]+", args.workspace_id):
-        parser.error("Workspace ID must contain only letters, digits and hyphens.")
+    raw_workspace = str(args.workspace_id or "").strip()
+    args.workspace_id = hotwords.normalize_workspace_id(raw_workspace)
+    if raw_workspace and not args.workspace_id:
+        parser.error("Workspace ID must be the bare ws-... id, not a full URL.")
     if not args.target_language.strip() or args.target_language == "auto":
         parser.error("An explicit translation target language is required.")
     return args
@@ -86,6 +89,7 @@ class ParaformerMTConnection(GummyConnection):
         super().__init__(args, api_key)
         self.engine_name = f"Paraformer + {args.mt_model}"
         self.translation_context = deque(maxlen=max(0, int(getattr(args, "context_turns", 0))))
+        self.source_history: deque = deque(maxlen=8)
         host = f"{args.workspace_id}.cn-beijing.maas.aliyuncs.com" if args.workspace_id else "dashscope.aliyuncs.com"
         self.websocket_url = f"wss://{host}/api-ws/v1/inference"
         self.translation_url = f"https://{host}/compatible-mode/v1/chat/completions"
@@ -195,6 +199,9 @@ class ParaformerMTConnection(GummyConnection):
         if sentence_id in self.seen_sentences:
             return
         final = bool(sentence.get("sentence_end"))
+        history = list(self.source_history) if final else []
+        if final:
+            self.source_history.append(text)
         result = {
             "event": "result", "sentence_id": sentence_id, "source": text,
             "source_final": final, "begin_time": sentence.get("begin_time"),
@@ -205,7 +212,9 @@ class ParaformerMTConnection(GummyConnection):
             self.seen_sentences.add(sentence_id)
             if self.args.translation_enabled:
                 try:
-                    self.pending.put_nowait(result)
+                    queued = dict(result)
+                    queued["_history"] = history
+                    self.pending.put_nowait(queued)
                     self.translation_queued += 1
                     emit({"event": "translation_queued", "sentence_id": sentence_id})
                 except queue.Full:
@@ -219,10 +228,13 @@ class ParaformerMTConnection(GummyConnection):
             return True
         return any(f"{source}{honorific}" in text for honorific in HONORIFICS)
 
-    def translate(self, text: str, sentence_id: str = "") -> str:
+    def translate(self, text: str, sentence_id: str = "",
+                  history: Optional[List[str]] = None) -> str:
         if getattr(self.args, "correct_names", False) and self.hotword_config:
             text = self.hotword_config.correct_kana_surfaces(text)
-        terms = self.hotword_config.select_mt_terms(text) if self.hotword_config else []
+        recent = list(history) if history is not None else list(self.source_history)
+        terms = (self.hotword_config.select_mt_terms(text, history=recent)
+                 if self.hotword_config else [])
         if terms:
             emit({
                 "event": "hotword_hit",
@@ -285,7 +297,7 @@ class ParaformerMTConnection(GummyConnection):
         )
         self.mt_requests += 1
         started = time.monotonic()
-        with urllib.request.urlopen(request, timeout=15, context=self.ssl_context) as response:
+        with urllib.request.urlopen(request, timeout=MT_TIMEOUT, context=self.ssl_context) as response:
             data = json.loads(response.read())
         usage = data.get("usage") or {}
         self.input_tokens += int(usage.get("prompt_tokens") or 0)
@@ -331,7 +343,9 @@ class ParaformerMTConnection(GummyConnection):
                 while attempt < MT_ATTEMPTS:
                     attempt += 1
                     try:
-                        translated = self.translate(str(result["source"]), str(sentence_id))
+                        translated = self.translate(
+                            str(result["source"]), str(sentence_id),
+                            list(result.get("_history") or []))
                         emit({"event": "result", "sentence_id": sentence_id,
                               "translation": translated, "translation_final": True})
                         break
@@ -350,7 +364,10 @@ class ParaformerMTConnection(GummyConnection):
                             self._translation_failed(result, reason)
                             break
                         time.sleep(0.25 * attempt)
-                    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                    except TimeoutError as exc:
+                        self._translation_failed(result, f"MT timeout after {MT_TIMEOUT}s: {exc}")
+                        break
+                    except (urllib.error.URLError, ConnectionError, OSError) as exc:
                         reason = f"{type(exc).__name__}: {exc}"
                         if attempt >= MT_ATTEMPTS:
                             self._translation_failed(result, reason)
