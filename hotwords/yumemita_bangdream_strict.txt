@@ -1,6 +1,8 @@
 # Live Interpreter default hotword list — precision-first.
 # Derived from upstream v0.3.2 mainline; removes common-word homophones
-# (ゆめみた/国王/ヴィオラ) and adds only strong guest-name forms.
+# (ゆめみた/国王) and adds requested band/character names.
+# Targets use plain spellings: MyGO (no !) and 梦限大 (no infinity symbol).
+# Decorative forms such as MyGO!!!!! / ゆめ∞みた are MT-only aliases.
 # Bare そよ/たき/ともり are intentionally absent: use そよちゃん/たきちゃん
 # or the full name when the speaker really names them.
 #

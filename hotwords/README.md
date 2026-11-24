@@ -36,9 +36,9 @@ an existing vocabulary with the same prefix before creating a new one.
 ## Example data
 
 - `yumemita_bangdream_strict.txt` — **default**. Derived from upstream v0.3.2
-  mainline; removes common-word homophones (`ゆめみた`, `国王`, `ヴィオラ`) and
-  adds only strong guest-name forms. Bare `そよ`/`たき`/`ともり` are deliberately
-  absent.
+  mainline; removes common-word homophones (`ゆめみた`, `国王`) and adds the
+  requested MyGO / Mujica / 梦限大 / MewType / 薇欧拉 terms. Targets use plain
+  spellings: `MyGO` (no exclamation marks) and `梦限大` (no infinity symbol).
 - `yumemita_bangdream.txt` — opt-in expanded branch list (other bands, game
   cast, family gags). It is not loaded by default.
 
