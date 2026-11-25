@@ -45,7 +45,7 @@ class HotwordMemoryTests(unittest.TestCase):
                 with mock.patch.dict("os.environ", {"DASHSCOPE_API_KEY": "test"}), \
                         mock.patch.object(live, "run_cloud_session", side_effect=lambda *args: stop.set()) as session:
                     live.cloud_stream_loop(args, live.State(), stop, {}, {}, live.BrowserAudioInput())
-                command = session.call_args.args[6]
+                command = session.call_args.args[7]
                 self.assertEqual(command[command.index("--hotwords-file") + 1], str(path))
 
     def test_translation_sends_only_matching_terms_for_native_and_general_models(self):

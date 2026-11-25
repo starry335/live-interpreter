@@ -48,6 +48,8 @@ class HotwordFileTests(unittest.TestCase):
         self.assertNotIn("戦国ユーノ", config.asr_terms())
         self.assertEqual(config.postprocess("战国由乃和拉卡马奇奥尔雷"), "由乃和阿拉蕾")
         self.assertEqual(config.postprocess("正常文本"), "正常文本")
+        self.assertEqual(config.postprocess("都酱来了"), "都子酱来了")
+        self.assertEqual(config.postprocess("みやこ酱来了"), "都子酱来了")
 
     def test_sections_and_derived_forbidden_target(self):
         path = self.write(
@@ -58,6 +60,35 @@ class HotwordFileTests(unittest.TestCase):
         config = hotwords.load(path)
         self.assertEqual(config.asr_terms(), ["千石ユノ", "ユノ"])
         self.assertEqual([(t.source, t.target) for t in config.forbidden], [("战国由乃", "由乃")])
+
+    def test_asr_replace_uses_only_listed_surfaces(self):
+        path = self.write(
+            "asr_replace.txt",
+            "[hotwords]\nあられ => 阿拉蕾\n峰月律 => 律\n[asr-replace]\nアラレ\n峰月律\n",
+        )
+        config = hotwords.load(path)
+        self.assertTrue(config.asr_replace)
+        self.assertEqual(config.asr_terms(), ["アラレ", "峰月律"])
+        self.assertEqual([t.source for t in config.mt_terms()], ["あられ", "峰月律"])
+
+    def test_context_section_is_kept_for_asr(self):
+        path = self.write(
+            "context.txt",
+            "[hotwords]\nヒロ => 希罗\n[context]\n作品『X』の登場人物: ヒロ(ヒロちゃん)。\n",
+        )
+        config = hotwords.load(path)
+        self.assertIn("ヒロ(ヒロちゃん)", config.context)
+        self.assertEqual(config.summary()["context_chars"], len(config.context))
+
+    def test_asr_warm_terms_get_weight_one(self):
+        path = self.write(
+            "warm.txt",
+            "[hotwords]\nあられ => 阿拉蕾\n[asr-warm]\nひろ\n",
+        )
+        config = hotwords.load(path)
+        weights = config.asr_weights(5)
+        self.assertEqual(weights["あられ"], 5)
+        self.assertEqual(weights["ひろ"], 1)
 
     def test_duplicate_source_keeps_first_and_warns(self):
         path = self.write("dup.txt", "あられ => 阿拉蕾\nあられ => 亚蕾\n")
@@ -108,7 +139,42 @@ class HotwordFileTests(unittest.TestCase):
     def test_single_character_surface_is_not_applied(self):
         config = hotwords.load(self.write("single.txt", "律 => 律\nりつ => 律\n"))
         self.assertEqual(config.select_mt_terms("旋律が好き"), [])
+        # Core cast bare names stay eligible (product headline hotwords); the
+        # context-only gate cost 16pt recall for <1pt charF1 in the A/B.
         self.assertEqual([t.source for t in config.select_mt_terms("りつが好き")], ["りつ"])
+
+    def test_normalize_workspace_id_accepts_url_or_bare(self):
+        url = "https://ws-5iw1srfwubsjj8t9.cn-beijing.maas.aliyuncs.com/api/v1"
+        self.assertEqual(hotwords.normalize_workspace_id(url), "ws-5iw1srfwubsjj8t9")
+        self.assertEqual(
+            hotwords.normalize_workspace_id("ws-abc.cn-beijing.maas.aliyuncs.com/api/v1"),
+            "ws-abc",
+        )
+        self.assertEqual(hotwords.normalize_workspace_id("ws-abc"), "ws-abc")
+        self.assertEqual(hotwords.normalize_workspace_id(""), "")
+        self.assertEqual(hotwords.normalize_workspace_id("https://example.com/api"), "")
+
+    def test_bare_core_name_must_be_a_standalone_word(self):
+        config = hotwords.load(self.write(
+            "names.txt", "ゆの => 由乃\nりつ => 律\nののか => 野乃花\n"))
+        # Particles/honorifics/end/punctuation after the name are fine.
+        self.assertEqual([t.source for t in config.select_mt_terms("ゆのから行きます")], ["ゆの"])
+        self.assertEqual([t.source for t in config.select_mt_terms("ゆの。")], ["ゆの"])
+        self.assertEqual([t.source for t in config.select_mt_terms("ののか")], ["ののか"])
+        # ASR has no spaces: a name often follows a particle.  Do not reject
+        # でもりつも / ちょっとりつは just because the previous char is kana.
+        self.assertEqual([t.source for t in config.select_mt_terms("でもりつも言ってないよ")], ["りつ"])
+        self.assertEqual([t.source for t in config.select_mt_terms("ちょっとりつは")], ["りつ"])
+        self.assertEqual([t.source for t in config.select_mt_terms("りつって笑う")], ["りつ"])
+        self.assertEqual([t.source for t in config.select_mt_terms("りつばっかり")], ["りつ"])
+        self.assertEqual(config.select_mt_terms("きりつ"), [])
+        self.assertEqual(config.select_mt_terms("こりつ"), [])
+        # Substrings of ordinary verbs are not names: 振りつけ, ありつ,
+        # ふりつけ, みやこののか.
+        self.assertEqual(config.select_mt_terms("振りつけ？"), [])
+        self.assertEqual(config.select_mt_terms("ふりつけ"), [])
+        self.assertEqual(config.select_mt_terms("ありつ"), [])
+        self.assertEqual(config.select_mt_terms("みやこののか"), [])
 
     def test_prompt_block_is_bounded(self):
         lines = "\n".join(f"語{i} => 词{i}" for i in range(300))
@@ -118,20 +184,43 @@ class HotwordFileTests(unittest.TestCase):
         self.assertTrue(block.startswith("Terminology"))
 
     def test_repository_example_keeps_short_names_and_skips_asr_miswrites(self):
-        path = Path(__file__).resolve().parent / "hotwords" / "yumemita_bangdream.txt"
+        path = hotwords.builtin_path()
         config = hotwords.load(path)
         self.assertEqual(config.warnings, [])
         self.assertIn("あられ", config.asr_terms())
         self.assertIn("ゆのち", config.asr_terms())
-        self.assertNotIn("戦国ユーノ", config.asr_terms())
-        self.assertIn("戦国ユーノ", [term.source for term in config.mt_terms()])
-        self.assertIn("ラカマチオルレ", [term.source for term in config.mt_terms()])
-        self.assertEqual(config.postprocess("我是战国由乃"), "我是由乃")
+        self.assertTrue(config.aliases)
+        self.assertTrue(config.forbidden)
+        self.assertLessEqual(len(config.mt_terms()), 200)
+        self.assertLessEqual(len(config.asr_terms()), 500)
+        self.assertIn("野乃酱", config.translation_phrases().values())
+        # Precision-first default: no bare そよ/たき/ともり injection.
+        self.assertNotIn("そよ", [term.source for term in config.mt_terms()])
+        self.assertNotIn("たき", [term.source for term in config.mt_terms()])
         # A Chinese target must not leave Japanese kana in the subtitle. This
         # caught the offline kb_terms typo "のの酱".
         kana = re.compile(r"[ぁ-ゖァ-ヺ]")
         for term in config.mt_terms():
             self.assertFalse(kana.search(term.target), term)
+
+    def test_default_list_includes_requested_band_terms(self):
+        config = hotwords.load(hotwords.builtin_path())
+        asr = config.asr_terms()
+        for term in ("MyGO", "Mujica", "Ave Mujica", "AveMujica", "MewType",
+                     "ミュータイプ", "みゅーたいぷ", "夢限大", "夢限大みゅーたいぷ",
+                     "むげんだいみゅーたいぷ", "ヴィオラ", "ビオラ", "Viola"):
+            self.assertIn(term, asr, term)
+        # The bare common word 無限大 must not be forced to the band name.
+        self.assertNotIn("無限大", asr)
+        self.assertEqual(config.translation_phrases()["MyGO"], "MyGO")
+        self.assertEqual(config.translation_phrases()["Mujica"], "Mujica")
+        self.assertEqual(config.translation_phrases()["MewType"], "MewType")
+        self.assertEqual(config.translation_phrases()["ヴィオラ"], "薇欧拉")
+        # Decorative official spellings never reach the subtitle.
+        self.assertNotIn("MyGO!!!!!", asr)
+        self.assertFalse(any("∞" in term.target for term in config.mt_terms()))
+        self.assertEqual(config.postprocess("MyGO!!!!! 和 梦限大∞"), "MyGO 和 梦限大")
+        self.assertLessEqual(len(config.mt_terms()), 200)
 
     def test_invalid_files_fail_fast(self):
         with self.assertRaises(hotwords.HotwordError):
@@ -160,9 +249,8 @@ class HotwordFileTests(unittest.TestCase):
         config = hotwords.load(path)
         self.assertEqual(config.translation_phrases()["あられ"], "自定义阿拉蕾")
         self.assertEqual(config.translation_phrases()["山田リョウ"], "山田凉")
-        self.assertIn("戦国ユーノ", config.translation_phrases())
+        self.assertIn("ゆのち", config.translation_phrases())
         self.assertNotIn("戦国ユーノ", config.asr_terms())
-        self.assertEqual(config.postprocess("我是战国由乃"), "我是由乃")
 
     def test_builtin_can_be_disabled_without_losing_custom_terms(self):
         path = self.write("memory.json", json.dumps({

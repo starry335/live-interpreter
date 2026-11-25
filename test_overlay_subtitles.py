@@ -12,13 +12,31 @@ def event(index: int, finalized_at: float) -> dict:
 
 events = [event(index, 100.0 + index) for index in range(6)]
 text, source = compose_live_subtitles(events, 3, 6, 8.0, 800, now=107.0)
-assert text.splitlines() == [f"translation {index}" for index in range(6)]
+assert text.splitlines() == ["，".join(f"translation {index}" for index in range(6))]
 assert source.splitlines() == ["source 4", "source 5"]
 
 text, source = compose_live_subtitles(events, 3, 6, 8.0, 800, now=120.0)
-assert text.splitlines() == ["translation 3", "translation 4", "translation 5"]
+assert text.splitlines() == ["，".join(f"translation {index}" for index in range(3, 6))]
 assert source.splitlines() == ["source 4", "source 5"]
 print("overlay subtitle retention: ok")
+
+# A short punctuated fragment must still merge into the previous paragraph:
+# ASR/MT punctuates every fragment, so a trailing 。 used to disable merging.
+short_events = [
+    {"source": "a", "translated": "买给我？", "final": True, "finalized_at": 100.0},
+    {"source": "b", "translated": "吗？", "final": True, "finalized_at": 101.0},
+]
+text, _ = compose_live_subtitles(short_events, 2, 6, 8.0, 800, now=102.0)
+assert text.splitlines() == ["买给我，吗？"], text
+
+# A long, finished sentence still starts a new paragraph.
+long_events = [
+    {"source": "a", "translated": "这是一个足够长而且完整的句子。", "final": True, "finalized_at": 100.0},
+    {"source": "b", "translated": "律。", "final": True, "finalized_at": 101.0},
+]
+text, _ = compose_live_subtitles(long_events, 2, 6, 8.0, 800, now=102.0)
+assert text.splitlines() == ["这是一个足够长而且完整的句子。", "律。"], text
+print("overlay short-fragment merge: ok")
 
 assert resize_geometry("se", 100, 100, 980, 280, 120, 80) == (100, 100, 1100, 360)
 assert resize_geometry("nw", 100, 100, 980, 280, 50, 30) == (150, 130, 930, 250)

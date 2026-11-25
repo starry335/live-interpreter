@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import BinaryIO, Dict, Iterable, List, Optional, Tuple
 
 import hotwords
+import runtime_safety
 
 
 ROOT = Path(__file__).resolve().parent
@@ -31,6 +32,8 @@ ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr
 GUMMY_WORKER = ROOT / "gummy_realtime_worker.py"
 QWEN_LIVE_WORKER = ROOT / "qwen_livetranslate_worker.py"
 PARAFORMER_MT_WORKER = ROOT / "paraformer_mt_worker.py"
+QWEN_ASR_WORKER = ROOT / "qwen_asr_stream_worker.py"
+QWEN_ASR_MODEL = "qwen-audio-3.1-asr-flash-streaming"
 QWEN_LIVE_MODELS = {
     "qwen3.5-live": "qwen3.5-livetranslate-flash-realtime",
     "qwen3.8-live": "qwen3.8-livetranslate-flash-realtime",
@@ -648,6 +651,85 @@ class BrowserAudioInput:
             return b""
 
 
+class PcmStream:
+    """Long-lived 16 kHz PCM source that survives cloud-worker reconnects.
+
+    A reader thread drains the capture process into a bounded queue.  When the
+    worker restarts, the queue still holds the last few seconds of speech, so a
+    reconnect does not silently drop the sentence being spoken.
+    """
+
+    def __init__(self, audio_device: str, max_frames: int = 50) -> None:
+        self.audio_device = audio_device
+        self.frames: "queue.Queue[bytes]" = queue.Queue(maxsize=max(5, int(max_frames)))
+        self.proc: Optional[subprocess.Popen] = None
+        self.reader: Optional[threading.Thread] = None
+        self.stderr_reader: Optional[threading.Thread] = None
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+
+    def start(self) -> None:
+        self.stop_event.clear()
+        self.proc = start_pcm_audio_capture(self.audio_device)
+        self.reader = threading.Thread(target=self._read_loop, args=(self.proc,), daemon=True)
+        self.reader.start()
+        self.stderr_reader = threading.Thread(
+            target=forward_binary_stderr, args=(self.proc, "audio"), daemon=True
+        )
+        self.stderr_reader.start()
+
+    def _read_loop(self, proc: subprocess.Popen) -> None:
+        if not proc.stdout:
+            return
+        try:
+            while not self.stop_event.is_set():
+                frame = proc.stdout.read(3200)
+                if not frame:
+                    break
+                try:
+                    self.frames.put_nowait(frame)
+                except queue.Full:
+                    try:
+                        self.frames.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self.frames.put_nowait(frame)
+                    except queue.Full:
+                        pass
+        finally:
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def read(self, timeout: float = 0.5) -> bytes:
+        try:
+            return self.frames.get(timeout=timeout)
+        except queue.Empty:
+            return b""
+
+    def restart(self) -> None:
+        self.stop()
+        self.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        proc, self.proc = self.proc, None
+        if proc is not None:
+            stop_process(proc, pcm_input=False)
+        if self.reader is not None and self.reader is not threading.current_thread():
+            self.reader.join(timeout=1)
+        if self.stderr_reader is not None and self.stderr_reader is not threading.current_thread():
+            self.stderr_reader.join(timeout=1)
+        self.reader = None
+        self.stderr_reader = None
+
+
 class BrowserVisualInput:
     def __init__(self, path: Path, enabled: bool) -> None:
         self.path = path
@@ -724,7 +806,28 @@ def compose_live_subtitles(
     ]
     while len("\n".join(translated_parts)) > maximum_chars and len(translated_parts) > minimum_events:
         translated_parts.pop(0)
-    translated = "\n".join(translated_parts)
+    # Short consecutive lines read like broken sentences on screen.  Merge a
+    # short line into the previous paragraph even when it already ends with a
+    # sentence mark: ASR/MT punctuates every fragment, so requiring an
+    # unpunctuated tail made this loop a no-op (the 2026-11 fragmentation bug).
+    # A long, properly ended line still starts a new paragraph.
+    sentence_end = ("。", "！", "？", "!", "?")
+    if len(translated_parts) >= 2:
+        merged: List[str] = [translated_parts[0]]
+        for part in translated_parts[1:]:
+            previous = merged[-1]
+            previous_body = previous.rstrip("。！？!?，,、 ")
+            if not previous_body:
+                merged[-1] = part
+            elif len(previous_body) >= 14 and previous.endswith(sentence_end):
+                merged.append(part)
+            else:
+                merged[-1] = previous_body + "，" + part.lstrip("，,、 ")
+        translated = "\n".join(merged)
+    elif translated_parts:
+        translated = translated_parts[0]
+    else:
+        translated = ""
     source = "\n".join(source_parts)
     if not translated and source:
         return source, ""
@@ -1411,6 +1514,7 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         fade_progress: float,
         control_progress: float,
         current_time: float,
+        max_visible_lines: Optional[int] = None,
     ) -> None:
         canvas.delete("all")
         button_bounds.clear()
@@ -1518,6 +1622,12 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
             source_lines = wrapped_source[-min(len(wrapped_source), max_source_lines) :] if max_source_lines else []
         source_height = len(source_lines) * source_line_height
         available_height = max(line_height, content_bottom - content_top - source_height - (source_gap if source_lines else 0))
+        if max_visible_lines:
+            available_height = min(
+                available_height,
+                max_visible_lines * line_height
+                + max(0, max_visible_lines - 1) * sentence_gap,
+            )
 
         sentences = [part.strip() for part in text.splitlines() if part.strip()]
         blocks = [(sentence, wrap_pixels(sentence, subtitle_font, content_width)) for sentence in sentences]
@@ -1579,12 +1689,15 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         )
 
     def compose_live(events: List[Dict[str, object]], now: float) -> Tuple[str, str]:
+        # Keep the old paragraph merge / translation-only display, but retain
+        # more events so three lines stay on screen instead of being pushed
+        # out after the 8 s hold.
         return compose_live_subtitles(
             events,
             args.overlay_live_events,
-            args.overlay_live_max_events,
-            args.overlay_hold_seconds,
-            args.overlay_live_max_chars,
+            max(20, args.overlay_live_max_events),
+            max(60.0, args.overlay_hold_seconds),
+            max(900, args.overlay_live_max_chars),
             now=now,
         )
 
@@ -1602,6 +1715,9 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         events = snapshot["events"]
         if args.overlay_live_mode:
             text, source = compose_live(events, float(snapshot["monotonic_now"]))
+            paragraphs = [part for part in text.splitlines() if part.strip()]
+            if len(paragraphs) > 2:
+                text = "\n".join(paragraphs[-2:])
         else:
             if len(events) < int(display_state["count"]):
                 display_state["count"] = 0
@@ -1654,7 +1770,8 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         )
         render_key = f"{current_status}\n{text}\n{source}\n{canvas.winfo_width()}x{canvas.winfo_height()}\n{ui_state['show_source']}\n{ui_state['locked']}\n{ui_state['expanded']}\n{ui_state['hover']}\n{ui_state['controls_visible']}\n{round(fade_progress, 1)}\n{round(control_progress, 1)}\n{int(current_time - float(ui_state['empty_since']))}\n{int(current_time - float(ui_state['status_changed_at']))}"
         if render_key != last_rendered["text"]:
-            draw_text(text, source, current_status, fade_progress, control_progress, current_time)
+            draw_text(text, source, current_status, fade_progress, control_progress,
+                      current_time, max_visible_lines=2)
             last_rendered["text"] = render_key
         animating = fade_progress < 1.0 or 0.0 < control_progress < 1.0
         root.after(30 if animating else (100 if ui_state["controls_visible"] else 200), refresh)
@@ -2083,7 +2200,7 @@ def stop_process(proc: Optional[subprocess.Popen], *, pcm_input: bool = False) -
     except Exception:
         pass
     try:
-        proc.wait(timeout=8 if pcm_input else 5)
+        proc.wait(timeout=15 if pcm_input else 5)
     except subprocess.TimeoutExpired:
         proc.terminate()
         try:
@@ -2164,12 +2281,15 @@ def handle_cloud_output(
         line = raw.decode("utf-8", errors="replace").strip()
         if not line:
             continue
+        connection_state["last_output"] = time.monotonic()
         try:
             message = json.loads(line)
         except json.JSONDecodeError:
             print(f"[{engine_name}] {line}", flush=True)
             continue
         event = message.get("event")
+        if event == "heartbeat":
+            continue
         if event == "ready":
             connection_state["ok"] = True
             connection_state["connected_at"] = time.monotonic()
@@ -2194,15 +2314,48 @@ def handle_cloud_output(
                 final=final,
             )
             label = "final" if final else "partial"
+            if message.get("fallback"):
+                label = f"fallback {label}"
             text = translated if translated is not None else source
             if text:
                 state.set_status(f"listening ({engine_name})")
-                print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
+                # Streaming/draft updates redraw the overlay but would flood the
+                # console; only finals and source partials are worth logging.
+                provisional = (
+                    translated is not None
+                    and not final
+                    and (message.get("streaming") or message.get("draft"))
+                )
+                if not provisional:
+                    print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
+        elif event == "asr_stall_handover":
+            state.set_status(f"listening ({engine_name}, Paraformer fallback)")
+            print(f"{engine_name} fallback: Paraformer took over after "
+                  f"{message.get('age_s')}s without 3.1 results", flush=True)
+        elif event == "asr_fallback_done":
+            print(f"{engine_name} fallback: recycling the worker after "
+                  f"{message.get('after_s')}s to return to 3.1", flush=True)
+        elif event == "session_config":
+            hints = message.get("language_hints") or []
+            print(f"{engine_name} session: model={message.get('model')} "
+                  f"source={message.get('source_language')} hints={hints} mt={message.get('mt_mode')}", flush=True)
         elif event == "hotword_vocabulary":
+            asr_list = message.get("asr_term_list") or []
             print(f"{engine_name} hotwords: {message.get('asr_terms')} ASR terms, "
-                  f"{message.get('mt_terms')} translation terms, vocabulary={message.get('vocabulary_id')}", flush=True)
+                  f"{message.get('mt_terms')} translation terms, vocabulary={message.get('vocabulary_id')}",
+                  flush=True)
+            if asr_list:
+                sample = "、".join(str(term) for term in asr_list[:12])
+                print(f"{engine_name} hotword list: {sample} …（共 {len(asr_list)} 条）", flush=True)
+        elif event == "hotword_hit":
+            terms = message.get("terms") or []
+            pairs = "，".join(f"{term.get('source')}=>{term.get('target')}" for term in terms)
+            print(f"{engine_name} hotword hit [{message.get('sentence_id')}]: {pairs}", flush=True)
         elif event in {"translation_usage", "usage_summary"}:
             print(f"{engine_name} usage: {json.dumps(message, ensure_ascii=True)}", flush=True)
+        elif event == "translation_failed":
+            print(f"{engine_name} translation failed [{message.get('sentence_id')}]: "
+                  f"{message.get('reason', '')}", file=sys.stderr, flush=True)
         elif event == "warning":
             print(f"{engine_name} warning: {message.get('message', '')}", file=sys.stderr, flush=True)
         elif event in {"error", "fatal_error"}:
@@ -2229,6 +2382,15 @@ def cloud_retry_delay(failures: int) -> float:
     return min(30.0, 2.0 ** min(max(0, failures - 1), 5))
 
 
+def check_worker_alive(connection_state: Dict[str, object], proc: subprocess.Popen,
+                       seconds: float = 25.0) -> None:
+    if proc.poll() is not None:
+        return
+    last = float(connection_state.get("last_output") or 0.0)
+    if last and time.monotonic() - last > seconds:
+        raise RuntimeError(f"worker stopped responding for {seconds:g}s (no heartbeat)")
+
+
 def cloud_stream_loop(
     args: argparse.Namespace,
     state: State,
@@ -2239,11 +2401,17 @@ def cloud_stream_loop(
 ) -> None:
     is_qwen_live = args.asr_engine in QWEN_LIVE_MODELS
     is_paraformer_mt = args.asr_engine == "paraformer-mt"
+    is_qwen_asr = args.asr_engine == "qwen3.1-audio"
     engine_name = (
         f"Paraformer + {args.mt_model}" if is_paraformer_mt else
+        f"Qwen ASR 3.1 + {args.mt_model}" if is_qwen_asr else
         args.asr_engine.replace("qwen", "Qwen").replace("-live", " LiveTranslate") if is_qwen_live else "Gummy"
     )
-    worker_path = PARAFORMER_MT_WORKER if is_paraformer_mt else QWEN_LIVE_WORKER if is_qwen_live else GUMMY_WORKER
+    worker_path = (
+        PARAFORMER_MT_WORKER if is_paraformer_mt else
+        QWEN_ASR_WORKER if is_qwen_asr else
+        QWEN_LIVE_WORKER if is_qwen_live else GUMMY_WORKER
+    )
     if not os.environ.get("DASHSCOPE_API_KEY", "").strip():
         state.set_status("missing Alibaba Cloud API key")
         print("Missing DASHSCOPE_API_KEY. Enter the API key in the launcher.", file=sys.stderr, flush=True)
@@ -2259,6 +2427,10 @@ def cloud_stream_loop(
         print("Missing Alibaba Cloud Workspace ID.", file=sys.stderr, flush=True)
         stop_event.set()
         return
+    if is_qwen_asr and not args.aliyun_workspace_id.strip():
+        print("Qwen3.1 is using the shared dashscope.aliyuncs.com endpoint; "
+              "fill Workspace ID for the workspace-specific (recommended, more stable) endpoint.",
+              file=sys.stderr, flush=True)
     if not getattr(sys, "frozen", False) and not worker_path.exists():
         state.set_status(f"{engine_name} worker missing")
         print(f"{engine_name} worker not found: {worker_path}", file=sys.stderr, flush=True)
@@ -2267,7 +2439,9 @@ def cloud_stream_loop(
 
     command = [
         sys.executable,
-        "--paraformer-mt-worker" if is_paraformer_mt else "--qwen-worker" if is_qwen_live else "--gummy-worker",
+        "--paraformer-mt-worker" if is_paraformer_mt else
+        "--qwen-asr-worker" if is_qwen_asr else
+        "--qwen-worker" if is_qwen_live else "--gummy-worker",
     ] if getattr(sys, "frozen", False) else [
         sys.executable,
         str(worker_path),
@@ -2294,13 +2468,40 @@ def cloud_stream_loop(
         if args.visual_input and args.audio_device == BROWSER_DEVICE:
             command.extend(["--visual-file", str(args.work_dir / "visual_frame.jpg")])
     else:
-        command.extend(["--max-end-silence", str(args.gummy_max_end_silence)])
+        # 3.1 uses the user's end-silence directly: the GUI recommends 300 ms
+        # for the near-field VAD, and silently forcing 200 ms made captions
+        # fragment into one-word lines.
+        silence = int(args.gummy_max_end_silence)
+        command.extend(["--max-end-silence", str(silence)])
     if is_paraformer_mt:
         command.extend([
             "--workspace-id", args.aliyun_workspace_id, "--region", args.aliyun_region,
             "--log-file", str(args.work_dir / "paraformer_mt.jsonl"),
             "--mt-model", args.mt_model,
+            "--mt-mode", args.mt_mode,
+            "--context-turns", str(args.context_turns),
         ])
+    elif is_qwen_asr:
+        command.extend([
+            "--model", QWEN_ASR_MODEL,
+            # Loopback / single-streamer audio is near-field and clean; the
+            # far-field default keeps whole monologues in one segment.
+            "--vad-model", "near_meeting_16k",
+            "--workspace-id", args.aliyun_workspace_id, "--region", args.aliyun_region,
+            "--log-file", str(args.work_dir / "qwen_asr.jsonl"),
+            "--mt-model", args.mt_model,
+            # Cost-tuned production profile: reference glossary without extra
+            # context, measured at the Paraformer baseline.
+            "--mt-mode", "reference",
+            "--context-turns", str(args.context_turns),
+        ])
+    if is_paraformer_mt or is_qwen_asr:
+        # A public Paraformer main model has no backup: running the same
+        # endpoint twice would share the failure.  A workspace Paraformer or
+        # Qwen main model gets a public Paraformer backup.
+        backup_allowed = bool(getattr(args, "asr_backup", True)) and not (
+            is_paraformer_mt and not args.aliyun_workspace_id.strip())
+        command.append("--asr-backup" if backup_allowed else "--no-asr-backup")
     if args.hotwords:
         command.extend(["--hotwords", str(Path(args.hotwords).expanduser().resolve())])
     elif args.hotwords_file:
@@ -2314,13 +2515,20 @@ def cloud_stream_loop(
     handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     logger.addHandler(handler)
     failures = 0
+    rapid_failures: List[float] = []
+    pcm_stream: Optional[PcmStream] = None
     try:
+        if args.audio_device != BROWSER_DEVICE:
+            pcm_stream = PcmStream(args.audio_device)
         while not stop_event.is_set():
             session_id = uuid.uuid4().hex[:12]
-            connection_state: Dict[str, object] = {"ok": False, "ended": False, "error": "", "connected_at": None}
+            connection_state: Dict[str, object] = {
+                "ok": False, "ended": False, "error": "", "connected_at": None,
+                "last_output": time.monotonic(),
+            }
             try:
                 run_cloud_session(args, state, stop_event, audio_holder, cloud_holder, browser_audio,
-                                  command, engine_name, session_id, connection_state)
+                                  pcm_stream, command, engine_name, session_id, connection_state)
             except Exception as exc:
                 connection_state["error"] = str(exc)
             if connection_state.get("fatal"):
@@ -2330,6 +2538,10 @@ def cloud_stream_loop(
             connected_at = connection_state.get("connected_at")
             if connected_at is not None and time.monotonic() - float(connected_at) >= 60:
                 failures = 0
+            now = time.monotonic()
+            if connected_at is None or now - float(connected_at) < 60:
+                rapid_failures.append(now)
+            rapid_failures = [item for item in rapid_failures if now - item < 300]
             failures += 1
             delay = cloud_retry_delay(failures)
             reason = str(connection_state.get("error") or "cloud worker exited")
@@ -2340,9 +2552,18 @@ def cloud_stream_loop(
             message = f"{engine_name} session {session_id}: {reason}; retry in {delay:g}s; last subtitle={latest.get('chunk') if latest else 'none'}"
             logger.warning(message)
             print(message, file=sys.stderr, flush=True)
+            if len(rapid_failures) >= 5:
+                stop_event.set()
+                state.set_status(f"{engine_name} crashed 5 times in 5 minutes; stopped")
+                print(f"{engine_name} crashed 5 times within 5 minutes; giving up. "
+                      f"See {args.work_dir / 'crash.log'}.", file=sys.stderr, flush=True)
+                break
             if stop_event.wait(delay):
                 break
     finally:
+        if pcm_stream is not None:
+            pcm_stream.stop()
+            audio_holder["proc"] = None
         handler.close()
         logger.removeHandler(handler)
 
@@ -2354,6 +2575,7 @@ def run_cloud_session(
     audio_holder: Dict[str, Optional[subprocess.Popen]],
     cloud_holder: Dict[str, Optional[subprocess.Popen]],
     browser_audio: BrowserAudioInput,
+    pcm_stream: Optional[PcmStream],
     command: List[str],
     engine_name: str,
     session_id: str,
@@ -2361,6 +2583,10 @@ def run_cloud_session(
 ) -> None:
     if not state.snapshot()["reconnecting"]:
         state.set_status(f"connecting to Alibaba Cloud {engine_name}")
+    child_options = bundled_child_options()
+    child_env = child_options.setdefault("env", os.environ.copy())
+    child_env["LIVE_INTERPRETER_WORK_DIR"] = str(args.work_dir)
+    child_env["LIVE_INTERPRETER_CRASH_LOG"] = str(args.work_dir / "crash.log")
     cloud_proc = subprocess.Popen(
         command,
         cwd=str(ROOT),
@@ -2368,7 +2594,7 @@ def run_cloud_session(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,
-        **bundled_child_options(),
+        **child_options,
     )
     cloud_holder["proc"] = cloud_proc
     ready = threading.Event()
@@ -2379,7 +2605,7 @@ def run_cloud_session(
             state,
             ready,
             connection_state,
-            args.asr_engine in QWEN_LIVE_MODELS or args.translation_engine != "none",
+            args.asr_engine in QWEN_LIVE_MODELS or args.asr_engine == "qwen3.1-audio" or args.translation_engine != "none",
             engine_name,
             session_id,
         ),
@@ -2394,7 +2620,8 @@ def run_cloud_session(
     restart_count = 0
     try:
         # Vocabulary list/create requests can take up to 30s before the WebSocket opens.
-        startup_timeout = 65 if args.asr_engine == "paraformer-mt" and (args.hotwords or args.hotwords_file) else 25
+        startup_timeout = 90 if args.asr_engine in {"paraformer-mt", "qwen3.1-audio"} and (
+        args.hotwords or args.hotwords_file) else 25
         deadline = time.monotonic() + startup_timeout
         while not ready.wait(0.1):
             if stop_event.is_set():
@@ -2408,54 +2635,48 @@ def run_cloud_session(
                 connection_state["error"] = "connection initialization timed out or worker exited"
             return
         if args.audio_device == BROWSER_DEVICE:
-            browser_audio.discard_pending()
             state.set_status("waiting for Edge tab audio")
             if not cloud_proc.stdin:
                 raise RuntimeError(f"{engine_name} stream pipe is unavailable.")
             while not stop_event.is_set() and not connection_state["ended"] and cloud_proc.poll() is None:
+                check_worker_alive(connection_state, cloud_proc)
                 frame = browser_audio.read()
                 if not frame:
                     continue
                 cloud_proc.stdin.write(frame)
                 cloud_proc.stdin.flush()
             return
+        if pcm_stream is None:
+            raise RuntimeError("PCM audio source is unavailable.")
+        if not pcm_stream.alive():
+            pcm_stream.start()
+            audio_holder["proc"] = pcm_stream.proc
         while not stop_event.is_set() and not connection_state["ended"] and cloud_proc.poll() is None:
-            capture_proc = start_pcm_audio_capture(args.audio_device)
-            audio_holder["proc"] = capture_proc
-            capture_stderr_thread = threading.Thread(
-                target=forward_binary_stderr, args=(capture_proc, "audio"), daemon=True
-            )
-            capture_stderr_thread.start()
+            if not pcm_stream.alive():
+                restart_count += 1
+                audio_holder["proc"] = None
+                state.set_status("audio device changed; restarting capture")
+                print(f"Realtime audio capture stopped; restarting (attempt {restart_count}).",
+                      file=sys.stderr, flush=True)
+                pcm_stream.restart()
+                audio_holder["proc"] = pcm_stream.proc
+            if not cloud_proc.stdin:
+                raise RuntimeError(f"{engine_name} stream pipe is unavailable.")
             try:
-                if not capture_proc.stdout or not cloud_proc.stdin:
-                    raise RuntimeError(f"Audio or {engine_name} stream pipe is unavailable.")
                 while not stop_event.is_set() and not connection_state["ended"] and cloud_proc.poll() is None:
-                    frame = capture_proc.stdout.read(3200)
+                    check_worker_alive(connection_state, cloud_proc)
+                    frame = pcm_stream.read(timeout=0.5)
                     if not frame:
-                        break
+                        if not pcm_stream.alive():
+                            break
+                        continue
                     cloud_proc.stdin.write(frame)
                     cloud_proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
                 raise RuntimeError(f"audio stream interrupted: {exc}") from exc
-            finally:
-                stop_process(capture_proc)
-                capture_stderr_thread.join(timeout=1)
-                for stream in (capture_proc.stdout, capture_proc.stderr):
-                    if stream:
-                        stream.close()
-                audio_holder["proc"] = None
-
             if stop_event.is_set() or connection_state["ended"] or cloud_proc.poll() is not None:
                 break
-            code = capture_proc.poll()
-            restart_count += 1
-            state.set_status("audio device changed; reconnecting")
-            print(
-                f"Realtime audio capture stopped with code {code}; reconnecting "
-                f"(attempt {restart_count}).",
-                flush=True,
-            )
-            stop_event.wait(min(3.0, 0.5 * restart_count))
+            stop_event.wait(min(3.0, 0.5 * max(1, restart_count)))
     except Exception as exc:
         if stop_event.is_set():
             return
@@ -2472,7 +2693,10 @@ def run_cloud_session(
         output_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
         if not connection_state["error"] and not stop_event.is_set():
-            connection_state["error"] = f"cloud worker exited with code {cloud_proc.returncode}"
+            code = cloud_proc.returncode
+            connection_state["error"] = (
+                f"cloud worker exited: {runtime_safety.describe_exit_code(code)} (code {code})"
+            )
         cloud_holder["proc"] = None
         for stream in (cloud_proc.stdout, cloud_proc.stderr):
             if stream:
@@ -2621,12 +2845,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--source-language", default="auto", help="FunASR language: auto, zh, en, ja, ko, yue.")
     parser.add_argument(
         "--asr-engine",
-        choices=[*QWEN_LIVE_MODELS, "gummy", "paraformer-mt", "streaming", "sensevoice"],
-        default="qwen3.5-live",
+        choices=[*QWEN_LIVE_MODELS, "gummy", "paraformer-mt", "qwen3.1-audio", "streaming", "sensevoice"],
+        default="paraformer-mt",
     )
     parser.add_argument("--target-language", default="Chinese", help="Translation target language.")
     parser.add_argument("--translation-engine", choices=["qwen", "none"], default="qwen")
-    parser.add_argument("--mt-model", default="qwen-mt-lite", help="Text translation model for paraformer-mt.")
+    parser.add_argument("--mt-model", default="qwen3.8-max", help="Text translation model for paraformer-mt / qwen-audio-stream.")
+    parser.add_argument("--mt-mode", default="reference", choices=["force", "reference", "background"],
+                        help="Translation prompt mode; reference is the precision-first default.")
+    parser.add_argument("--asr-backup", action=argparse.BooleanOptionalAction, default=True,
+                        help="Start a public Paraformer backup when the main ASR stalls.")
+    parser.add_argument("--context-turns", type=int, default=0,
+                        help="Previous subtitles sent as context; 0 disables it (default).")
     glossary_group = parser.add_mutually_exclusive_group()
     glossary_group.add_argument("--hotwords-file", default="", help="Saved source/target terminology JSON file.")
     glossary_group.add_argument("--hotwords", default="", help="External hotword glossary (.txt or JSON).")
@@ -2777,7 +3007,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     audio_holder: Dict[str, Optional[subprocess.Popen]] = {"proc": None}
     cloud_holder: Dict[str, Optional[subprocess.Popen]] = {"proc": None}
     screen_proc: Optional[subprocess.Popen] = None
-    cloud_engines = {"gummy", "paraformer-mt", *QWEN_LIVE_MODELS}
+    cloud_engines = {"gummy", "paraformer-mt", "qwen3.1-audio", *QWEN_LIVE_MODELS}
     if args.asr_engine in cloud_engines:
         worker = threading.Thread(
             target=cloud_stream_loop,
@@ -2838,4 +3068,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(runtime_safety.guard("backend-main", main))

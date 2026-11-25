@@ -247,6 +247,19 @@ API Key 使用当前 Windows 用户的 DPAPI 加密保存，文件中不写入�
 --port 8765                 浏览器字幕页端口
 ```
 
+## 测试与复现（gold-v0.3）
+
+流式翻译的公开测试集在
+[bangdream-hotword-bench](https://github.com/HudsonHuang/bangdream-hotword-bench)：
+32 条人工精标高光、92.4 分钟、16 kHz WAV + 中文 SRT，同时评**回显节奏 / 翻译质量 / 热词**。
+
+本仓库只包含产品代码；离线回放/评分脚本与测试数据在独立的 bench 工作区
+（`bangdream-hotword-bench`）。云端 worker 从 stdin 读 PCM16 16 kHz mono，
+可直接接入任意回放或评分脚本。
+
+2–5 分钟参考结果：3.1 reference 首次中文 p50 **1.34 s**、charF1 **0.445**、人名召回 **92.3%**、成本 **2.74 元/h**；
+Paraformer 基线分别是 1.77 s / 0.430 / 76.9% / 2.71 元/h。
+
 ## 依赖说明
 
 独立安装版自带 Python 3.11 运行时、`websocket-client`、`certifi` 和 Tcl/Tk，只使用云端实时模型，不要求显卡。

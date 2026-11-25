@@ -76,7 +76,9 @@ class ParaformerMTTests(unittest.TestCase):
             "choices": [{"message": {"content": "译文"}, "finish_reason": "stop"}], "usage": {},
         }).encode()
         for model in worker.MT_MODELS:
-            connection = worker.ParaformerMTConnection(worker.parse_args(["--mt-model", model]), "test")
+            connection = worker.ParaformerMTConnection(
+                worker.parse_args(["--mt-model", model, "--context-turns", "2"]), "test"
+            )
             with self.subTest(model=model), mock.patch.object(worker.urllib.request, "urlopen", return_value=response) as post, mock.patch.object(worker, "emit"):
                 for n in range(4):
                     connection.translate(f"{n}" + "あ" * 300)
@@ -142,7 +144,7 @@ class ParaformerMTTests(unittest.TestCase):
                 live.cloud_stream_loop(args, live.State(), stop, {"proc": None}, {"proc": None}, live.BrowserAudioInput())
             self.assertTrue(stop.is_set())
             self.assertEqual(session.call_count, 1)
-            command = session.call_args.args[6]
+            command = session.call_args.args[7]
             self.assertIn(str(live.PARAFORMER_MT_WORKER), command)
             self.assertIn(str(Path(directory) / "paraformer_mt.jsonl"), command)
             self.assertEqual(command[command.index("--mt-model") + 1], "qwen3.8-max")
