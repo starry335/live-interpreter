@@ -17,7 +17,6 @@ a = Analysis(
     datas=collect_data_files('certifi') + [
         (str(ROOT / 'hotwords' / 'yumemita_bangdream_strict.txt'), 'hotwords'),
         (str(ROOT / 'hotwords' / 'yumemita_bangdream.txt'), 'hotwords'),
-        (str(ROOT / 'hotwords' / 'name_cards.json'), 'hotwords'),
     ],
     hiddenimports=['certifi', 'websocket', 'tkinter', 'tkinter.font', 'hotwords',
                    'runtime_safety', 'qwen_asr_stream_worker'],

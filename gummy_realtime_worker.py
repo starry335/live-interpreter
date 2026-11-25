@@ -134,6 +134,8 @@ class GummyConnection:
 
         Only fires when audio is still arriving and recent PCM energy says
         someone is speaking; silence/music pauses do not trigger a reconnect.
+        Subclasses can handle the stall (e.g. switch to a fallback engine) by
+        overriding ``on_stall`` and returning True.
         """
         timeout = float(os.environ.get("LIVE_INTERPRETER_ASR_WATCHDOG", "10") or 0)
         if timeout <= 0:
@@ -161,6 +163,8 @@ class GummyConnection:
             }
             emit(payload)
             runtime_safety.log_disconnect({"kind": "asr_stall", **payload})
+            if self.on_stall(payload):
+                return
             self.error = f"ASR watchdog: no result for {age:.1f}s while speech audio was arriving."
             self.failed.set()
             self.finished.set()
@@ -170,6 +174,10 @@ class GummyConnection:
             except Exception:
                 pass
             return
+
+    def on_stall(self, payload: Dict[str, object]) -> bool:
+        """Hook for a fallback engine. Return True if the stall was handled."""
+        return False
 
     def _ping_loop(self, interval: float) -> None:
         """Send WebSocket pings so NAT/LB idle timers do not reap the socket."""

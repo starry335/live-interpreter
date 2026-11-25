@@ -2458,8 +2458,6 @@ def cloud_stream_loop(
             "--mt-mode", args.mt_mode,
             "--context-turns", str(args.context_turns),
         ])
-        if args.hotword_cards:
-            command.extend(["--hotword-cards", str(Path(args.hotword_cards).expanduser().resolve())])
     elif is_qwen_asr:
         command.extend([
             "--model", QWEN_ASR_MODEL,
@@ -2469,15 +2467,11 @@ def cloud_stream_loop(
             "--workspace-id", args.aliyun_workspace_id, "--region", args.aliyun_region,
             "--log-file", str(args.work_dir / "qwen_asr.jsonl"),
             "--mt-model", args.mt_model,
-            # Cost-tuned production profile: reference glossary without the long
-            # ICL examples or extra context, measured at the Paraformer baseline.
+            # Cost-tuned production profile: reference glossary without extra
+            # context, measured at the Paraformer baseline.
             "--mt-mode", "reference",
             "--context-turns", str(args.context_turns),
-            "--no-warm-names",
-            "--no-name-consistency",
         ])
-        if args.hotword_cards:
-            command.extend(["--hotword-cards", str(Path(args.hotword_cards).expanduser().resolve())])
     if args.hotwords:
         command.extend(["--hotwords", str(Path(args.hotwords).expanduser().resolve())])
     elif args.hotwords_file:
@@ -2827,9 +2821,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--target-language", default="Chinese", help="Translation target language.")
     parser.add_argument("--translation-engine", choices=["qwen", "none"], default="qwen")
     parser.add_argument("--mt-model", default="qwen3.8-max", help="Text translation model for paraformer-mt / qwen-audio-stream.")
-    parser.add_argument("--mt-mode", default="reference", choices=["force", "reference", "background", "icl", "icl2"],
+    parser.add_argument("--mt-mode", default="reference", choices=["force", "reference", "background"],
                         help="Translation prompt mode; reference is the precision-first default.")
-    parser.add_argument("--hotword-cards", default="", help="JSON {source: attribute} for ICL name cards.")
     parser.add_argument("--context-turns", type=int, default=0,
                         help="Previous subtitles sent as context; 0 disables it (default).")
     glossary_group = parser.add_mutually_exclusive_group()

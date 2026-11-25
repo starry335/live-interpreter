@@ -15,7 +15,6 @@ a = Analysis(
     datas=[
         (str(ROOT / 'hotwords' / 'yumemita_bangdream_strict.txt'), 'hotwords'),
         (str(ROOT / 'hotwords' / 'yumemita_bangdream.txt'), 'hotwords'),
-        (str(ROOT / 'hotwords' / 'name_cards.json'), 'hotwords'),
     ],
     hiddenimports=['runtime_safety'],
     hookspath=[],

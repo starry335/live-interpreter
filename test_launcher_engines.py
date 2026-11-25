@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ICL toggle and the qwen-audio 3.1 engine entry in the launcher."""
+"""Engine selection, defaults and legacy-ICL removal in the launcher."""
 import gc
 import os
 import sys
@@ -14,7 +14,7 @@ import live_interpreter_launcher as launcher
 
 
 @unittest.skipUnless(os.name == "nt", "launcher UI tests are Windows only")
-class IclToggleTests(unittest.TestCase):
+class LauncherEngineTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -82,7 +82,7 @@ class IclToggleTests(unittest.TestCase):
         self.assertTrue(command[command.index("--hotwords") + 1].endswith("yumemita_bangdream_strict.txt"))
         self.assertEqual(command[command.index("--mt-mode") + 1], "reference")
 
-    def test_no_icl_toggle_and_always_reference_prompt(self):
+    def test_no_legacy_icl_toggle_and_always_reference_prompt(self):
         app = self.make_app()
         self.assertFalse(hasattr(app, "icl_check"))
         self.assertFalse(hasattr(app, "icl_enabled"))

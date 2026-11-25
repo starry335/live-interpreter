@@ -253,24 +253,12 @@ API Key 使用当前 Windows 用户的 DPAPI 加密保存，文件中不写入�
 [bangdream-hotword-bench](https://github.com/HudsonHuang/bangdream-hotword-bench)：
 32 条人工精标高光、92.4 分钟、16 kHz WAV + 中文 SRT，同时评**回显节奏 / 翻译质量 / 热词**。
 
-本仓库提供：
-
-- `tools/replay_stream.py`：把 WAV 按 1x 喂给 `qwen_asr_stream_worker.py`，记录每句的时间轴；
-- `docs/BENCHMARK_V03.md`：下载数据、跑 reference / ICL、用 `eval_stream.py` 打分的完整命令。
-
-最小跑法：
-
-```powershell
-python tools/replay_stream.py --wav gold-v0.3/audio/xxx.wav --out runs/31_ref -- `
-  --model qwen-audio-3.1-asr-flash-streaming --max-end-silence 200 `
-  --vad-model near_meeting_16k --mt-model qwen3.8-max --mt-mode reference `
-  --hotwords hotwords/yumemita_bangdream.txt
-```
+本仓库只包含产品代码；离线回放/评分脚本与测试数据在独立的 bench 工作区
+（`bangdream-hotword-bench`）。云端 worker 从 stdin 读 PCM16 16 kHz mono，
+可直接接入任意回放或评分脚本。
 
 2–5 分钟参考结果：3.1 reference 首次中文 p50 **1.34 s**、charF1 **0.445**、人名召回 **92.3%**、成本 **2.74 元/h**；
-Paraformer 基线分别是 1.77 s / 0.430 / 76.9% / 2.71 元/h。详见 `docs/BENCHMARK_V03.md`。
-
-模块框图（基线 vs 3.1 主推）见 `docs/ARCHITECTURE.md`。
+Paraformer 基线分别是 1.77 s / 0.430 / 76.9% / 2.71 元/h。
 
 ## 依赖说明
 

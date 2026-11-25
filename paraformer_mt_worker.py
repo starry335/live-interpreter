@@ -55,10 +55,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--region", choices=["beijing"], default="beijing")
     parser.add_argument("--log-file", default="")
     parser.add_argument("--hotwords", "--hotwords-file", dest="hotwords", default="", help="Hotword glossary file (.txt or JSON).")
-    parser.add_argument("--mt-mode", choices=["force", "reference", "icl", "icl2"], default="icl",
-                        help="icl: name cards + contrastive examples in the same call (default).")
-    parser.add_argument("--hotword-cards", default="",
-                        help="Optional JSON {source: attribute} giving ICL name cards (e.g. 人名/乐队名 + homophone note).")
+    parser.add_argument("--mt-mode", choices=["force", "reference"], default="reference",
+                        help="force: always use the glossary target; reference: use it only when "
+                             "the name is actually spoken.")
     parser.add_argument("--mt-min-chars", type=int, default=0)
     parser.add_argument("--mt-drop-aliases", action="store_true")
     parser.add_argument("--mt-honorific", action=argparse.BooleanOptionalAction, default=True,
@@ -110,8 +109,6 @@ class ParaformerMTConnection(GummyConnection):
         self.hotword_config = (
             hotwords.load(args.hotwords) if str(getattr(args, "hotwords", "")).strip() else None
         )
-        cards_path = getattr(args, "hotword_cards", "") or str(hotwords.builtin_cards_path())
-        self.name_attributes = hotwords.load_attributes(cards_path) if Path(cards_path).exists() else {}
         self.vocabulary_id = ""
         for warning in self.hotword_config.warnings if self.hotword_config else []:
             LOGGER.warning(warning)
@@ -220,14 +217,6 @@ class ParaformerMTConnection(GummyConnection):
                 except queue.Full:
                     self._translation_failed(result, "Translation queue full; showing original text.")
 
-    def _term_allowed(self, source: str, text: str) -> bool:
-        """Strong written forms always pass; short kana-only readings need an honorific."""
-        if any("\u4e00" <= ch <= "\u9fff" for ch in source) or source.isascii():
-            return True
-        if len(source) >= getattr(self.args, "mt_kana_min", 4):
-            return True
-        return any(f"{source}{honorific}" in text for honorific in HONORIFICS)
-
     def translate(self, text: str, sentence_id: str = "",
                   history: Optional[List[str]] = None) -> str:
         if getattr(self.args, "correct_names", False) and self.hotword_config:
@@ -266,7 +255,6 @@ class ParaformerMTConnection(GummyConnection):
                 terms,
                 source_language=self.args.source_language,
                 target_language=self.args.target_language,
-                attributes=self.name_attributes,
             )
             body = {
                 "model": self.args.mt_model,

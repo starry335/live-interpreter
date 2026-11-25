@@ -23,7 +23,6 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import queue
-import re
 import ssl
 import sys
 import threading
@@ -36,7 +35,6 @@ from typing import Dict, List, Optional
 from gummy_realtime_worker import GummyConnection
 import hotwords
 import runtime_safety
-import warm_names
 
 
 ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming"
@@ -92,11 +90,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--asr-vocabulary-limit", type=int, default=300,
                         help="Cap instant ASR vocabulary terms; keeps the task request small "
                              "enough for long 3.1 sessions.")
-    parser.add_argument("--mt-mode", choices=["force", "reference", "background", "icl", "icl2"], default="icl",
+    parser.add_argument("--mt-mode", choices=["force", "reference", "background"], default="reference",
                         help="force: current Live Interpreter wording; reference: names are reference "
                              "spellings and may never be inserted when not spoken.")
-    parser.add_argument("--icl-examples", type=int, default=2,
-                        help="Contrastive examples kept in the ICL prompt (0 = none, negative = all).")
     parser.add_argument("--mt-min-chars", type=int, default=0,
                         help="Drop translation terms whose source is shorter than this many characters.")
     parser.add_argument("--mt-drop-aliases", action="store_true",
@@ -140,18 +136,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Model used only for provisional drafts; empty reuses --mt-model.")
     parser.add_argument("--draft-max-tokens", type=int, default=256,
                         help="Maximum output tokens for a provisional draft.")
-    parser.add_argument("--hotword-cards", default="",
-                        help="Optional JSON {source: attribute} for ICL name cards.")
     parser.add_argument("--context-text", default="",
                         help="Background context for qwen-audio-3.1 input.context (names, readings, domain).")
     parser.add_argument("--correct-names", action="store_true",
                         help="Snap near-miss kana name spellings onto known readings before MT.")
-    parser.add_argument("--warm-names", action=argparse.BooleanOptionalAction, default=False,
-                        help="Recall game/anime names by pronunciation for the final MT prompt "
-                             "(off by default: precision-first).")
-    parser.add_argument("--name-consistency", action=argparse.BooleanOptionalAction, default=False,
-                        help="Prefer the neighbouring name when one final uses a lone hotword name "
-                             "(off by default: it can invent a different name).")
     parser.add_argument("--asr-warm", action=argparse.BooleanOptionalAction, default=True,
                         help="Send [asr-warm] terms at weight 1; --no-asr-warm keeps the hot list only.")
     args = parser.parse_args(argv)
@@ -209,8 +197,6 @@ class QwenASRStreamConnection(GummyConnection):
             getattr(args, "context_text", "")
             or (self.hotword_config.context if self.hotword_config else "")
         )[:400]
-        cards_path = getattr(args, "hotword_cards", "") or str(hotwords.builtin_cards_path())
-        self.name_attributes = hotwords.load_attributes(cards_path) if Path(cards_path).exists() else {}
         self.vocabulary: Dict[str, int] = {}
         vocabulary_limit = max(1, int(getattr(args, "asr_vocabulary_limit", 175)))
         if args.vocabulary_file:
@@ -231,7 +217,6 @@ class QwenASRStreamConnection(GummyConnection):
             "source_language": args.source_language,
             "language_hints": [] if args.source_language == "auto" else [args.source_language],
             "hotwords": str(getattr(args, "hotwords", "")),
-            "cards": cards_path,
             "mt_mode": args.mt_mode,
         })
         emit({
@@ -305,57 +290,6 @@ class QwenASRStreamConnection(GummyConnection):
         super().send_audio(data)
         self.audio_bytes += len(data)
 
-    def _correct_name_consistency(self, text: str) -> str:
-        """Replace a one-off hotword name with the name used in nearby lines.
-
-        The 3.1 vocabulary treats short member names as a closed class; an
-        unknown game character such as ひろちゃん can be written as 律ちゃん.
-        If two of the previous three finals use another name and this final is
-        the only occurrence of the hotword name, prefer the neighbouring name.
-        Real name switches repeat in the window and are left alone.
-        """
-        groups = {
-            "ritsu": ("りつ", "リツ", "律", "りつちゃん", "リツちゃん", "律ちゃん"),
-            "hiro": ("ひろ", "ヒロ", "ヒロちゃん"),
-            "yuno": ("ゆの", "ユノ", "ゆのちゃん", "ユノちゃん"),
-            "nonoka": ("ののか", "ノノカ", "ののちゃん", "ノンちゃん", "のちゃん", "ノちゃん"),
-            "miyako": ("みやこ", "ミヤコ", "みやこちゃん", "ミャーコちゃん"),
-            "arale": ("あられ", "アラレ", "あられちゃん", "アラレちゃん"),
-        }
-        window = self.source_history[-3:] + [text]
-        counts: Dict[str, int] = {}
-        surfaces: Dict[str, str] = {}
-        current_group = ""
-        for group, variants in groups.items():
-            for variant in variants:
-                if variant in text:
-                    current_group = group
-                    break
-            count = sum(1 for line in window if any(v in line for v in variants))
-            if count:
-                counts[group] = count
-                for line in window:
-                    for variant in variants:
-                        if variant in line:
-                            surfaces[group] = variant
-                            break
-        if (
-            current_group in ("ritsu", "nonoka")
-            and counts.get(current_group, 0) <= 1
-            and counts.get("hiro", 0) >= 2
-            and surfaces.get("hiro")
-        ):
-            for variant in groups[current_group]:
-                if variant in text:
-                    replacement = surfaces["hiro"]
-                    if variant.endswith("ちゃん") and not replacement.endswith("ちゃん"):
-                        replacement += "ちゃん"
-                    text = text.replace(variant, replacement)
-                    break
-        self.source_history.append(text)
-        del self.source_history[:-8]
-        return text
-
     def _emit_result(self, message: Dict[str, object]) -> None:
         payload = message.get("payload") or {}
         output = payload.get("output") or {}
@@ -378,15 +312,11 @@ class QwenASRStreamConnection(GummyConnection):
             return
         history: List[str] = []
         if final:
-            # Snapshot the previous finals before this one is appended.  The
-            # name policy uses them to re-admit a bare core-cast name only
-            # after the same name was written strongly nearby.
+            # Snapshot the previous finals before this one is appended; the MT
+            # prompt uses them to resolve bare-name ambiguity.
             history = list(self.source_history[-3:])
-            if bool(getattr(self.args, "name_consistency", True)):
-                text = self._correct_name_consistency(text)
-            else:
-                self.source_history.append(text)
-                del self.source_history[:-8]
+            self.source_history.append(text)
+            del self.source_history[:-8]
         result = {
             "event": "result", "sentence_id": sentence_id, "source": text,
             "source_final": final, "begin_time": sentence.get("begin_time"),
@@ -410,18 +340,6 @@ class QwenASRStreamConnection(GummyConnection):
         else:
             self._maybe_draft(sentence_id, text)
 
-    def _term_allowed(self, source: str, text: str) -> bool:
-        """Strong written forms always pass; short kana-only readings need an honorific."""
-        if any("\u4e00" <= ch <= "\u9fff" for ch in source) or source.isascii():
-            return True
-        if len(source) >= getattr(self.args, "mt_kana_min", 4):
-            return True
-        return any(f"{source}{honorific}" in text for honorific in HONORIFICS)
-
-    def _icl_limit(self) -> Optional[int]:
-        value = int(getattr(self.args, "icl_examples", 2))
-        return None if value < 0 else max(0, value)
-
     def translate(self, text: str, sentence_id: str = "",
                   history: Optional[List[str]] = None) -> str:
         if getattr(self.args, "correct_names", False) and self.hotword_config:
@@ -429,12 +347,6 @@ class QwenASRStreamConnection(GummyConnection):
         recent = list(history) if history is not None else list(self.source_history[-3:])
         terms = (self.hotword_config.select_mt_terms(text, history=recent)
                  if self.hotword_config else [])
-        warm_terms = []
-        if bool(getattr(self.args, "warm_names", True)):
-            warm_terms = [hotwords.Term(source, target) for source, target in warm_names.retrieve(text)]
-        if warm_terms:
-            seen_sources = {term.source for term in terms}
-            terms = list(terms) + [term for term in warm_terms if term.source not in seen_sources]
         if terms:
             emit({
                 "event": "hotword_hit",
@@ -456,9 +368,7 @@ class QwenASRStreamConnection(GummyConnection):
             system_prompt += f"\nKnown name translations in this stream: {background_pairs}"
         else:
             system_prompt = hotwords.build_system_prompt(
-                mode, terms, self.args.source_language, self.args.target_language,
-                self.name_attributes,
-                icl_examples_limit=self._icl_limit())
+                mode, terms, self.args.source_language, self.args.target_language)
         context_turns = max(0, int(getattr(self.args, "context_turns", 0)))
         context = self.translation_context[-context_turns:] if context_turns else []
         short_limit = max(0, int(getattr(self.args, "short_context_chars", 0)))
@@ -685,9 +595,7 @@ class QwenASRStreamConnection(GummyConnection):
             terms = [term for term in terms if len(term.source) >= self.args.mt_min_chars]
         mode = getattr(self.args, "mt_mode", "force")
         system_prompt = hotwords.build_system_prompt(
-            mode, terms, self.args.source_language, self.args.target_language,
-            self.name_attributes,
-            icl_examples_limit=self._icl_limit())
+            mode, terms, self.args.source_language, self.args.target_language)
         system_prompt += (
             "\n这是实时字幕中说话者尚未说完的半句。只翻译已经说出的部分，"
             "保持未完成的状态；不要补全、不要重复、不要解释。只输出中文译文。"
