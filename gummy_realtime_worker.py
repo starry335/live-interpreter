@@ -74,6 +74,11 @@ class GummyConnection:
         self.watchdog_thread: Optional[threading.Thread] = None
         self.watchdog_fired = False
         self.last_result_end_ms = 0.0
+        # Absolute PCM bytes since the worker started.  Server timestamps
+        # restart at 0 for every reconnected stream, so the backup replay
+        # offset has to be anchored to this counter instead.
+        self.audio_total_bytes = 0
+        self.stream_start_ms = 0.0
         # Set when the stream is handed to the backup engine; a deliberately
         # closed socket must not be reported as a session error.
         self.handed_over = False
@@ -137,6 +142,7 @@ class GummyConnection:
             self.close_code = None
             self.close_reason = ""
             self.task_id = uuid.uuid4().hex
+            self.stream_start_ms = self.audio_total_bytes * 1000.0 / 32000.0
             self.ws = self._new_socket()
             ws = self.ws
             self.receiver = threading.Thread(
@@ -386,6 +392,8 @@ class GummyConnection:
             try:
                 self.ws.ping("live-interpreter")
             except Exception as exc:
+                if self._socket_errors_suppressed():
+                    return
                 runtime_safety.log_disconnect({
                     "kind": "ping_failed",
                     "engine": self.engine_name,
@@ -523,7 +531,8 @@ class GummyConnection:
         except (TypeError, ValueError):
             end_time = 0.0
         if end_time > 0:
-            self.last_result_end_ms = max(self.last_result_end_ms, end_time)
+            absolute_end = self.stream_start_ms + end_time
+            self.last_result_end_ms = max(self.last_result_end_ms, absolute_end)
         if self.probation:
             return
 
@@ -563,12 +572,22 @@ class GummyConnection:
         if self.failed.is_set() or self.finished.is_set():
             raise RuntimeError(self.error or f"{self.engine_name} task failed.")
         now = time.monotonic()
+        self.audio_total_bytes += len(data)
         if not self.last_audio_monotonic:
             # A connection can sit idle before its first frame; the watchdog
             # must count silence from that frame, not from task-started.
             self.last_result_monotonic = now
         self.last_audio_monotonic = now
-        if self._pcm_rms(data) >= int(os.environ.get("LIVE_INTERPRETER_ASR_WATCHDOG_RMS", "300") or 0):
+        rms_threshold = int(os.environ.get("LIVE_INTERPRETER_ASR_WATCHDOG_RMS", "300") or 0)
+        if self._pcm_rms(data) >= rms_threshold:
+            resume_gap = float(os.environ.get("LIVE_INTERPRETER_SPEECH_RESUME_GAP", "30") or 30)
+            if (self.last_speech_monotonic
+                    and now - self.last_speech_monotonic > resume_gap):
+                # Speech resumed after a long pause (video paused/muted).  The
+                # silence clock is stale; restart it so the watchdog does not
+                # instantly declare a stall on the first spoken frame.
+                self.last_result_monotonic = now
+                self.watchdog_fired = False
             self.last_speech_monotonic = now
         if self.fallback is not None:
             self.fallback.feed(data)

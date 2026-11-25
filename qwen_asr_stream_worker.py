@@ -41,7 +41,7 @@ ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming"
 DEFAULT_MT_MODEL = "deepseek-v4.1-flash-1017"
 TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
 MT_ATTEMPTS = 3
-MT_TIMEOUT = 8
+MT_TIMEOUT = 10
 LOGGER = logging.getLogger("qwen-asr-stream")
 
 
@@ -292,8 +292,8 @@ class QwenASRStreamConnection(GummyConnection):
         route = self.audio_route()
         if route == "backup":
             self.fallback_bytes += len(data)
-            if self.fallback is not None:
-                self.fallback.feed(data)
+            # The base method counts absolute audio bytes and feeds the ring.
+            super().send_audio(data)
             return
         super().send_audio(data)
         self.audio_bytes += len(data)
@@ -322,7 +322,8 @@ class QwenASRStreamConnection(GummyConnection):
         except (TypeError, ValueError):
             end_time = 0.0
         if end_time > 0:
-            self.last_result_end_ms = max(self.last_result_end_ms, end_time)
+            absolute_end = self.stream_start_ms + end_time
+            self.last_result_end_ms = max(self.last_result_end_ms, absolute_end)
         if self.probation:
             return
         sentence_id = str(sentence.get("begin_time", len(self.seen_sentences)))

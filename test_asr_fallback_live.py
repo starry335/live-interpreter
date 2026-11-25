@@ -193,6 +193,9 @@ class ForcedStallTests(unittest.TestCase):
         replay = [event for event in self.events if event.get("event") == "asr_fallback"]
         self.assertEqual(len(replay), 1)
         self.assertGreater(replay[0]["replayed_ms"], 0)
+        # The first stream starts at 0, so the replay is the missed window,
+        # not the whole 30 s ring.
+        self.assertLess(replay[0]["replayed_ms"], 30000)
 
     def test_main_recovery_stops_the_backup_and_switches_back(self):
         args = qwen.parse_args(["--no-asr-backup", "--no-translation"])
@@ -228,6 +231,7 @@ class ForcedStallTests(unittest.TestCase):
             while time.monotonic() < deadline and not self.connection.probation:
                 time.sleep(0.02)
             self.assertTrue(self.connection.probation, "main probe never entered probation")
+            start_offset = self.connection.stream_start_ms
             self.push_result(self.sockets[1], 2000, "回復")
             while time.monotonic() < deadline and not any(
                     event.get("event") == "asr_fallback_done" for event in self.events):
@@ -246,6 +250,10 @@ class ForcedStallTests(unittest.TestCase):
         # Probation results are used as a health signal but never duplicated
         # on screen.
         self.assertFalse(any(event.get("source") == "回復" for event in self.events))
+        # Reconnected streams restart their timestamps at 0; the replay offset
+        # must be anchored to the absolute audio position.
+        self.assertGreaterEqual(self.connection.last_result_end_ms, start_offset + 2000)
+        self.assertGreater(self.connection.last_result_end_ms, self.connection.stream_start_ms)
         # Live audio goes back to the main socket after the switch.
         before = len(self.sockets[1].binary)
         self.connection.send_audio(frame)

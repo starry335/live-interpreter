@@ -156,6 +156,15 @@ class QwenBackupRoutingTests(unittest.TestCase):
         with mock.patch("gummy_realtime_worker.emit"):
             self.assertFalse(connection.on_stall({"age_s": 10}))
 
+    def test_result_end_uses_the_absolute_stream_offset(self):
+        connection = self.make_connection()
+        connection.stream_start_ms = 120000.0
+        with mock.patch.object(qwen, "emit"):
+            connection._emit_result({"payload": {"output": {"sentence": {
+                "text": "あ", "begin_time": 1000, "end_time": 3000,
+                "sentence_end": False}}}})
+        self.assertEqual(connection.last_result_end_ms, 123000.0)
+
     def test_audio_route_switches_between_main_backup_and_probation(self):
         connection = self.make_connection()
         self.assertEqual(connection.audio_route(), "main")

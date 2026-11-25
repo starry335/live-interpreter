@@ -22,6 +22,8 @@ class WatchdogTests(unittest.TestCase):
         conn.fallback = None
         conn.probation = False
         conn.last_result_end_ms = 0.0
+        conn.audio_total_bytes = 0
+        conn.stream_start_ms = 0.0
         conn.handed_over = False
         conn.handing_over = False
         conn.ws = None
@@ -69,6 +71,15 @@ class WatchdogTests(unittest.TestCase):
         conn.send_audio(b"\x00\x10" * 1600)
         self.assertGreater(conn.last_result_monotonic, old)
         self.assertGreater(conn.last_audio_monotonic, 0.0)
+
+    def test_speech_after_a_long_pause_restarts_the_silence_clock(self) -> None:
+        conn = self.make_conn(last_result_age=120, speech_age=120)
+        conn.last_audio_monotonic = time.monotonic()
+        conn.ws = mock.Mock()
+        old = conn.last_result_monotonic
+        with mock.patch.dict(os.environ, {"LIVE_INTERPRETER_SPEECH_RESUME_GAP": "30"}):
+            conn.send_audio(b"\x00\x10" * 1600)
+        self.assertGreater(conn.last_result_monotonic, old)
 
     def test_qwen_heartbeat_does_not_count_as_a_result(self) -> None:
         args = qwen.parse_args(["--no-asr-backup"])

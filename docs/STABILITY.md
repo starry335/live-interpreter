@@ -51,9 +51,14 @@ Windows 进程退出码 `4294967295` 等于 `-1`。PyInstaller 打包的程序�
   Workspace ID），避免和主模型共用同一个专属域名/会话。
 - 本地保留最近 30 秒 PCM（`LIVE_INTERPRETER_FALLBACK_RING_SECONDS`）。切换时把
   “最后一条已经上屏的字幕之后”的音频从环形缓冲回填给备份，再把实时音频接上。
+  worker 记录的是**绝对音频毫秒**（累计 PCM 字节 / 32）；重连后服务端时间戳从 0
+  重新开始，绝对偏移不会跟着回退，所以不会每次回填整环 30 秒。
 - 主 worker 在备份工作期间每 15 秒尝试重连主 ASR（`LIVE_INTERPRETER_BACKUP_PROBE`）；
   重连成功并连续 8 秒出字（`LIVE_INTERPRETER_BACKUP_PROBATION`）后自动停掉备份、
   切回主 ASR。主模型一直不恢复时备份持续工作，不会定时重启。
+- 视频暂停/静音超过 `LIVE_INTERPRETER_SPEECH_RESUME_GAP`（默认 30 秒）后重新出现语音，
+  看门狗会以“语音恢复”为新起点重新计时，不会因为静音期间的旧计时立刻误判停摆。
+- 主 socket 主动关闭后，pinger 不再把它记成 `ping_failed`，断开日志只保留真正的异常。
 - 备份结果带 `pf...` 前缀的 `sentence_id` 和 `fallback: true`，不会覆盖主 ASR
   已经上屏的字幕；试运行期间主 ASR 的结果只用于健康判断，不会重复上屏。
 - 主模型是公开 Paraformer 时没有备份（同一端点做备份没有意义）；主模型是
@@ -108,7 +113,7 @@ launcher 和 backend 共用一套云端引擎集合；`qwen3.1-audio` 在 Edge �
   - `events_YYYYMMDD.jsonl`：完整事件流（含 watchdog、fallback、hotword hit、usage）；
   - `disconnect_YYYYMMDD.log`：WebSocket close code / ping 失败 / `asr_stall`；
   - `crash_YYYYMMDD.log`：未捕获异常；
-  - `mt_timeout_YYYYMMDD.log`：8 秒超时与回退；
+  - `mt_timeout_YYYYMMDD.log`：10 秒超时与回退；
   - `session_YYYYMMDD.log`：进程启动/结束。
 - `%WORK%\qwen_asr.jsonl` / `paraformer_mt.jsonl`：当前会话的滚动事件流。
 - `%WORK%\fallback\logs\YYYY-MM-DD\`：Paraformer 热备进程自己的日志。
