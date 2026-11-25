@@ -511,6 +511,9 @@ class State:
         self.history: List[Dict[str, object]] = []
         self.history_by_chunk: Dict[str, Dict[str, object]] = {}
         self.history_version = 0
+        # The sentence whose source is being recognized right now.  Translation
+        # streaming for an older sentence must not replace it on screen.
+        self.current_chunk = ""
 
     def _record_history(self, item: Dict[str, object]) -> None:
         """Keep one immutable display entry per finalized subtitle.
@@ -565,6 +568,8 @@ class State:
                     item["final"] = True
                     item["finalized_at"] = now
                     self._record_history(item)
+                    if self.current_chunk == item.get("chunk"):
+                        self.current_chunk = ""
             self.reconnecting_since = None
 
     def set_status(self, status: str) -> None:
@@ -587,6 +592,7 @@ class State:
         with self.lock:
             self.events.append(item)
             self.events = self.events[-80:]
+            self.current_chunk = chunk
 
     def update_event(self, chunk: str, translated: str) -> None:
         with self.lock:
@@ -623,11 +629,15 @@ class State:
                 }
                 self.events.append(item)
                 self.events = self.events[-80:]
-                if item["final"]:
+                if item.get("final"):
                     self._record_history(item)
+                elif source:
+                    self.current_chunk = chunk
                 return
             if source is not None:
                 item["source"] = source
+                if str(source).strip():
+                    self.current_chunk = chunk
             if translated is not None:
                 item["translated"] = translated
             if final:
@@ -654,18 +664,30 @@ class State:
             self.events.clear()
             self.history.clear()
             self.history_by_chunk.clear()
+            self.current_chunk = ""
             self.history_version += 1
 
     def overlay_snapshot(self) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]], int]:
         """Cheap view for the always-running overlay.
 
         Returns the history list by reference (entries are only appended or
-        updated in place), a copy of the newest event, and a version counter.
+        updated in place), the sentence currently being recognized, and a
+        version counter.  Translation streaming for an older sentence updates
+        that sentence, but must not hide the newer source being recognized.
         """
         with self.lock:
             current = None
-            if self.events and not self.events[-1].get("final"):
-                current = dict(self.events[-1])
+            if self.current_chunk:
+                for item in reversed(self.events):
+                    if item.get("chunk") == self.current_chunk:
+                        if not item.get("final"):
+                            current = dict(item)
+                        break
+            if current is None and not self.current_chunk:
+                for item in reversed(self.events):
+                    if not item.get("final"):
+                        current = dict(item)
+                        break
             return self.history, current, self.history_version
 
     def latest_event(self) -> Optional[Dict[str, object]]:
@@ -830,7 +852,7 @@ def _display_text(item: Dict[str, object]) -> str:
     return str(item.get("source", "") or "").strip()
 
 
-def merge_short_lines(parts: List[str], merge_chars: int = 6) -> List[str]:
+def merge_short_lines(parts: List[str], merge_chars: int = 14) -> List[str]:
     """Merge only very short fragments so normal sentences stay separate lines."""
     merged: List[str] = []
     sentence_end = ("。", "！", "？", "!", "?")
@@ -863,7 +885,7 @@ def overlay_live_blocks(
     history: List[Dict[str, object]],
     current: Optional[Dict[str, object]],
     max_blocks: int = 3,
-    merge_chars: int = 6,
+    merge_chars: int = 14,
 ) -> List[str]:
     """Two finalized lines plus the line currently being recognized."""
     has_current = bool(
@@ -884,7 +906,7 @@ def overlay_history_blocks(
     history: List[Dict[str, object]],
     end_index: int,
     max_blocks: int = 5,
-    merge_chars: int = 6,
+    merge_chars: int = 14,
 ) -> List[str]:
     """Up to ``max_blocks`` finalized lines ending before ``end_index``."""
     end_index = max(0, min(int(end_index), len(history)))
