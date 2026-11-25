@@ -9,7 +9,6 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import queue
-import re
 import ssl
 import sys
 import threading
@@ -28,7 +27,6 @@ MT_MODEL = "qwen-mt-lite"
 TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
 MT_ATTEMPTS = 3
 MT_TIMEOUT = 8
-HONORIFICS = ("ちゃん", "さん", "ちん", "たん", "くん", "様", "さま", "氏")
 MT_MODELS = (
     "qwen-mt-lite", "qwen-mt-flash", "qwen-mt-plus",
     "qwen3.8-flash", "qwen3.8-max", "deepseek-v4.1-flash-1017",

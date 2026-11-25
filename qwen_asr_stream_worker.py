@@ -43,7 +43,6 @@ DEFAULT_MT_MODEL = "deepseek-v4.1-flash-1017"
 TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
 MT_ATTEMPTS = 3
 MT_TIMEOUT = 8
-HONORIFICS = ("ちゃん", "さん", "ちん", "たん", "くん", "様", "さま", "氏")
 LOGGER = logging.getLogger("qwen-asr-stream")
 
 
