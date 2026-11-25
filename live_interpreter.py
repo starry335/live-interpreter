@@ -514,6 +514,17 @@ class State:
         # The sentence whose source is being recognized right now.  Translation
         # streaming for an older sentence must not replace it on screen.
         self.current_chunk = ""
+        # Stable sentence order: a long sentence's streaming translation can
+        # arrive after the next sentence's source partials, so arrival order
+        # cannot be used to order lines.
+        self.chunk_order: Dict[str, int] = {}
+        self.chunk_counter = 0
+
+    def _chunk_order(self, chunk: str) -> int:
+        if chunk not in self.chunk_order:
+            self.chunk_counter += 1
+            self.chunk_order[chunk] = self.chunk_counter
+        return self.chunk_order[chunk]
 
     def _record_history(self, item: Dict[str, object]) -> None:
         """Keep one immutable display entry per finalized subtitle.
@@ -534,6 +545,7 @@ class State:
                 "source": source,
                 "translated": translated,
                 "chunk": chunk,
+                "order": self._chunk_order(chunk),
             }
             self.history.append(entry)
             self.history_by_chunk[chunk] = entry
@@ -593,6 +605,7 @@ class State:
             self.events.append(item)
             self.events = self.events[-80:]
             self.current_chunk = chunk
+            self._chunk_order(chunk)
 
     def update_event(self, chunk: str, translated: str) -> None:
         with self.lock:
@@ -629,6 +642,7 @@ class State:
                 }
                 self.events.append(item)
                 self.events = self.events[-80:]
+                self._chunk_order(chunk)
                 if item.get("final"):
                     self._record_history(item)
                 elif source:
@@ -665,30 +679,36 @@ class State:
             self.history.clear()
             self.history_by_chunk.clear()
             self.current_chunk = ""
+            self.chunk_order.clear()
+            self.chunk_counter = 0
             self.history_version += 1
 
-    def overlay_snapshot(self) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]], int]:
+    def overlay_snapshot(
+        self,
+    ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], int]:
         """Cheap view for the always-running overlay.
 
-        Returns the history list by reference (entries are only appended or
-        updated in place), the sentence currently being recognized, and a
-        version counter.  Translation streaming for an older sentence updates
-        that sentence, but must not hide the newer source being recognized.
+        Returns the finalized history, the recent non-final sentences (latest
+        event per sentence, in sentence order) and a version counter.  Keeping
+        the non-final sentences lets a long sentence's streaming translation
+        stay visible while the next sentence's source is being recognized.
         """
         with self.lock:
-            current = None
-            if self.current_chunk:
-                for item in reversed(self.events):
-                    if item.get("chunk") == self.current_chunk:
-                        if not item.get("final"):
-                            current = dict(item)
-                        break
-            if current is None and not self.current_chunk:
-                for item in reversed(self.events):
-                    if not item.get("final"):
-                        current = dict(item)
-                        break
-            return self.history, current, self.history_version
+            active: List[Dict[str, object]] = []
+            seen = set()
+            for item in reversed(self.events):
+                chunk = str(item.get("chunk") or "")
+                if chunk in seen:
+                    continue
+                seen.add(chunk)
+                if not item.get("final"):
+                    copy = dict(item)
+                    copy["order"] = self.chunk_order.get(chunk, 0)
+                    active.append(copy)
+                if len(active) >= 6:
+                    break
+            active.sort(key=lambda entry: self.chunk_order.get(str(entry.get("chunk")), 0))
+            return self.history, active, self.history_version
 
     def latest_event(self) -> Optional[Dict[str, object]]:
         with self.lock:
@@ -883,23 +903,44 @@ def merge_short_lines(parts: List[str], merge_chars: int = 14) -> List[str]:
 
 def overlay_live_blocks(
     history: List[Dict[str, object]],
-    current: Optional[Dict[str, object]],
+    active: List[Dict[str, object]],
     max_blocks: int = 3,
-    merge_chars: int = 14,
-) -> List[str]:
-    """Two finalized lines plus the line currently being recognized."""
-    has_current = bool(
-        current
-        and not current.get("final")
-        and _display_text(current)
-    )
-    wanted = max(1, max_blocks - (1 if has_current else 0))
-    texts = [_display_text(item) for item in history[-(wanted + 6):]]
-    blocks = merge_short_lines([text for text in texts if text], merge_chars)
-    blocks = blocks[-wanted:]
-    if has_current and current is not None:
-        blocks.append(_display_text(current))
-    return blocks
+) -> Tuple[List[str], bool]:
+    """Last ``max_blocks`` sentences, finalized or still being translated.
+
+    The newest sentence is the bright current line.  Older non-final sentences
+    stay visible with their streaming translation, so a long sentence does not
+    hide behind the next sentence's source partials.
+    """
+    timeline: Dict[str, Tuple[int, str, bool]] = {}
+    for index, entry in enumerate(history[-max_blocks * 4:]):
+        chunk = str(entry.get("chunk") or f"_h{index}")
+        order = int(entry.get("order") or index)
+        timeline[chunk] = (order, _display_text(entry), True)
+    for item in active:
+        chunk = str(item.get("chunk") or "")
+        text = _display_text(item)
+        if not chunk or not text:
+            continue
+        existing = timeline.get(chunk)
+        if existing is not None and existing[2]:
+            continue
+        timeline[chunk] = (int(item.get("order") or 0), text, False)
+    ordered = sorted(timeline.values(), key=lambda value: value[0])
+    # Preserve the old display rule for consecutive finalized lines: a short
+    # finished fragment joins the previous finished line.  A sentence still
+    # being translated stays on its own line so its streaming text is visible.
+    merged: List[Tuple[int, str, bool]] = []
+    for order, text, final in ordered:
+        if (final and merged and merged[-1][2]
+                and len(merge_short_lines([merged[-1][1], text])) == 1):
+            merged[-1] = (merged[-1][0], merge_short_lines([merged[-1][1], text])[0], True)
+        else:
+            merged.append((order, text, final))
+    visible = merged[-max_blocks:]
+    blocks = [text for _order, text, _final in visible if text]
+    current_is_last = bool(visible and not visible[-1][2])
+    return blocks, current_is_last
 
 
 def overlay_history_blocks(
@@ -1887,17 +1928,15 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
             ui_state["status_changed_at"] = current_time
         events = snapshot["events"]
         if args.overlay_live_mode:
-            history, current, history_version = state.overlay_snapshot()
+            history, active, history_version = state.overlay_snapshot()
             if scroll_state["end"] is not None and not history:
                 scroll_state["end"] = None
             if scroll_state["end"] is None:
-                blocks = overlay_live_blocks(history, current, max_blocks=3)
+                blocks, current_is_last = overlay_live_blocks(history, active, max_blocks=3)
                 text = "\n".join(blocks)
                 source = ""
-                if current and not current.get("final"):
-                    source = str(current.get("source") or "").strip()
-                current_is_last = bool(
-                    current and not current.get("final") and _display_text(current))
+                if current_is_last and active:
+                    source = str(active[-1].get("source") or "").strip()
                 scroll_label = ""
                 live_view = True
             else:

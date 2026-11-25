@@ -15,70 +15,77 @@ class StateHistoryTests(unittest.TestCase):
         state.upsert_event("c1", source="第一句", translated="", final=True)
         state.upsert_event("c1", translated="第一句译文", final=True)
         state.upsert_event("c2", source="第二句", translated="第二句译文", final=True)
-        history, current, version = state.overlay_snapshot()
+        history, active, version = state.overlay_snapshot()
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0]["translated"], "第一句译文")
         self.assertEqual(history[1]["source"], "第二句")
-        self.assertIsNone(current)
+        self.assertEqual(active, [])
         self.assertGreater(version, 0)
 
     def test_partial_updates_do_not_create_history_entries(self):
         state = State()
         state.upsert_event("c1", source="正在", translated="", final=False)
         state.upsert_event("c1", source="正在识别", translated="草稿", final=False)
-        history, current, _version = state.overlay_snapshot()
+        history, active, _version = state.overlay_snapshot()
         self.assertEqual(history, [])
-        self.assertEqual(current["source"], "正在识别")
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["source"], "正在识别")
 
     def test_reconnect_finalizes_the_open_partial(self):
         state = State()
         state.upsert_event("c1", source="半句", translated="半句译文", final=False)
         state.begin_reconnect()
         state.finish_reconnect()
-        history, current, _version = state.overlay_snapshot()
+        history, active, _version = state.overlay_snapshot()
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["translated"], "半句译文")
+        self.assertEqual(active, [])
 
-    def test_translation_of_an_older_sentence_does_not_hide_the_new_source(self):
+    def test_streaming_translation_of_an_older_sentence_stays_visible(self):
         state = State()
         state.upsert_event("old", source="前の文", translated="", final=False)
         state.upsert_event("old", translated="前一句的流式译文", final=False)
         state.upsert_event("new", source="新しい文", translated="", final=False)
-        _history, current, _version = state.overlay_snapshot()
-        self.assertEqual(current["source"], "新しい文")
-        # Streaming translation for the previous sentence arrives late.
+        history, active, _version = state.overlay_snapshot()
+        blocks, current_is_last = overlay_live_blocks(history, active, 3)
+        self.assertEqual(blocks, ["前一句的流式译文", "新しい文"])
+        self.assertTrue(current_is_last)
+        # The old sentence's streaming translation keeps updating above the
+        # new Japanese source instead of disappearing until its final.
         state.upsert_event("old", translated="前一句的流式译文更新", final=False)
-        _history, current, _version = state.overlay_snapshot()
-        self.assertEqual(current["source"], "新しい文")
-        # Once the new sentence gets a draft/streaming translation it replaces
-        # the Japanese source on the current line.
+        history, active, _version = state.overlay_snapshot()
+        blocks, _current = overlay_live_blocks(history, active, 3)
+        self.assertEqual(blocks[0], "前一句的流式译文更新")
+        self.assertEqual(blocks[-1], "新しい文")
         state.upsert_event("new", translated="新句草稿", final=False)
-        _history, current, _version = state.overlay_snapshot()
-        self.assertEqual(current["translated"], "新句草稿")
-        state.upsert_event("new", translated="新句最终译文", final=True)
-        _history, current, _version = state.overlay_snapshot()
-        self.assertIsNone(current)
+        history, active, _version = state.overlay_snapshot()
+        blocks, _current = overlay_live_blocks(history, active, 3)
+        self.assertEqual(blocks[-1], "新句草稿")
 
 
 class BlockTests(unittest.TestCase):
-    def test_live_view_is_two_finals_plus_current(self):
-        history = [
-            {"source": f"s{i}", "translated": f"第{i}句已经确定了完整的中文字幕内容。"}
-            for i in range(5)
+    @staticmethod
+    def history(count: int, prefix: str = "第") -> list:
+        return [
+            {"chunk": f"s{i}", "order": i + 1,
+             "source": f"s{i}", "translated": f"{prefix}{i}句已经确定了完整的中文字幕内容。"}
+            for i in range(count)
         ]
-        current = {"source": "s5", "translated": "第六句正在识别", "final": False}
-        blocks = overlay_live_blocks(history, current, max_blocks=3)
+
+    def test_live_view_is_two_finals_plus_active_sentence(self):
+        history = self.history(5)
+        active = [{"chunk": "s5", "order": 6, "source": "s5",
+                   "translated": "第六句正在识别", "final": False}]
+        blocks, current_is_last = overlay_live_blocks(history, active, max_blocks=3)
         self.assertEqual(blocks, ["第3句已经确定了完整的中文字幕内容。",
                                   "第4句已经确定了完整的中文字幕内容。", "第六句正在识别"])
+        self.assertTrue(current_is_last)
 
-    def test_live_view_without_current_shows_three_finals(self):
-        history = [
-            {"source": f"s{i}", "translated": f"第{i}句已经确定了完整的中文字幕内容。"}
-            for i in range(5)
-        ]
-        blocks = overlay_live_blocks(history, None, max_blocks=3)
+    def test_live_view_without_active_shows_three_finals(self):
+        blocks, current_is_last = overlay_live_blocks(self.history(5), [], max_blocks=3)
         self.assertEqual(len(blocks), 3)
         self.assertEqual(blocks[-1], "第4句已经确定了完整的中文字幕内容。")
+        self.assertFalse(current_is_last)
 
     def test_short_fragments_merge_but_long_sentences_do_not(self):
         merged = merge_short_lines(["这是一个足够长而且完整的句子。", "这是另一个足够长而且完整的句子。"])
@@ -89,7 +96,8 @@ class BlockTests(unittest.TestCase):
 
     def test_history_window_walks_back_from_the_newest(self):
         history = [
-            {"source": f"s{i}", "translated": f"第{i}句已经确定了完整的历史字幕内容。"}
+            {"chunk": f"s{i}", "order": i + 1,
+             "translated": f"第{i}句已经确定了完整的历史字幕内容。"}
             for i in range(20)
         ]
         newest = overlay_history_blocks(history, 20, max_blocks=5)
