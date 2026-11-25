@@ -499,66 +499,11 @@ def list_devices() -> int:
 
 
 class State:
-    MAX_HISTORY = 20000
-
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.events: List[Dict[str, object]] = []
         self.status = "starting"
         self.reconnecting_since: Optional[float] = None
-        # Finalized subtitles are kept separately from the short ``events``
-        # window: the overlay scrolls back through the whole session.
-        self.history: List[Dict[str, object]] = []
-        self.history_by_chunk: Dict[str, Dict[str, object]] = {}
-        self.history_version = 0
-        # The sentence whose source is being recognized right now.  Translation
-        # streaming for an older sentence must not replace it on screen.
-        self.current_chunk = ""
-        # Stable sentence order: a long sentence's streaming translation can
-        # arrive after the next sentence's source partials, so arrival order
-        # cannot be used to order lines.
-        self.chunk_order: Dict[str, int] = {}
-        self.chunk_counter = 0
-
-    def _chunk_order(self, chunk: str) -> int:
-        if chunk not in self.chunk_order:
-            self.chunk_counter += 1
-            self.chunk_order[chunk] = self.chunk_counter
-        return self.chunk_order[chunk]
-
-    def _record_history(self, item: Dict[str, object]) -> None:
-        """Keep one immutable display entry per finalized subtitle.
-
-        Called with ``self.lock`` held.  A source final often arrives before
-        its translation; the same chunk updates the entry instead of adding a
-        second line.
-        """
-        source = str(item.get("source") or "").strip()
-        translated = str(item.get("translated") or "").strip()
-        if not source and not translated:
-            return
-        chunk = str(item.get("chunk") or "")
-        entry = self.history_by_chunk.get(chunk)
-        if entry is None:
-            entry = {
-                "time": item.get("time"),
-                "source": source,
-                "translated": translated,
-                "chunk": chunk,
-                "order": self._chunk_order(chunk),
-            }
-            self.history.append(entry)
-            self.history_by_chunk[chunk] = entry
-            if len(self.history) > self.MAX_HISTORY:
-                dropped = self.history.pop(0)
-                self.history_by_chunk.pop(str(dropped.get("chunk") or ""), None)
-        else:
-            if source:
-                entry["source"] = source
-            if translated:
-                entry["translated"] = translated
-            entry["time"] = item.get("time")
-        self.history_version += 1
 
     def begin_reconnect(self) -> None:
         with self.lock:
@@ -579,9 +524,6 @@ class State:
                     # A lost session cannot finish its last partial sentence.
                     item["final"] = True
                     item["finalized_at"] = now
-                    self._record_history(item)
-                    if self.current_chunk == item.get("chunk"):
-                        self.current_chunk = ""
             self.reconnecting_since = None
 
     def set_status(self, status: str) -> None:
@@ -604,8 +546,6 @@ class State:
         with self.lock:
             self.events.append(item)
             self.events = self.events[-80:]
-            self.current_chunk = chunk
-            self._chunk_order(chunk)
 
     def update_event(self, chunk: str, translated: str) -> None:
         with self.lock:
@@ -617,7 +557,6 @@ class State:
                     item["updated_at"] = now
                     item["final"] = True
                     item["finalized_at"] = now
-                    self._record_history(item)
                     return
 
     def upsert_event(
@@ -642,16 +581,9 @@ class State:
                 }
                 self.events.append(item)
                 self.events = self.events[-80:]
-                self._chunk_order(chunk)
-                if item.get("final"):
-                    self._record_history(item)
-                elif source:
-                    self.current_chunk = chunk
                 return
             if source is not None:
                 item["source"] = source
-                if str(source).strip():
-                    self.current_chunk = chunk
             if translated is not None:
                 item["translated"] = translated
             if final:
@@ -659,8 +591,6 @@ class State:
                 item["finalized_at"] = now
             item["time"] = _dt.datetime.now().strftime("%H:%M:%S")
             item["updated_at"] = now
-            if item.get("final"):
-                self._record_history(item)
 
     def snapshot(self) -> Dict[str, object]:
         with self.lock:
@@ -676,39 +606,6 @@ class State:
     def clear_events(self) -> None:
         with self.lock:
             self.events.clear()
-            self.history.clear()
-            self.history_by_chunk.clear()
-            self.current_chunk = ""
-            self.chunk_order.clear()
-            self.chunk_counter = 0
-            self.history_version += 1
-
-    def overlay_snapshot(
-        self,
-    ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]], int]:
-        """Cheap view for the always-running overlay.
-
-        Returns the finalized history, the recent non-final sentences (latest
-        event per sentence, in sentence order) and a version counter.  Keeping
-        the non-final sentences lets a long sentence's streaming translation
-        stay visible while the next sentence's source is being recognized.
-        """
-        with self.lock:
-            active: List[Dict[str, object]] = []
-            seen = set()
-            for item in reversed(self.events):
-                chunk = str(item.get("chunk") or "")
-                if chunk in seen:
-                    continue
-                seen.add(chunk)
-                if not item.get("final"):
-                    copy = dict(item)
-                    copy["order"] = self.chunk_order.get(chunk, 0)
-                    active.append(copy)
-                if len(active) >= 6:
-                    break
-            active.sort(key=lambda entry: self.chunk_order.get(str(entry.get("chunk")), 0))
-            return self.history, active, self.history_version
 
     def latest_event(self) -> Optional[Dict[str, object]]:
         with self.lock:
@@ -863,98 +760,6 @@ class BrowserVisualInput:
 def is_pending_translation(text: str) -> bool:
     normalized = str(text or "").strip().lower()
     return not normalized or normalized in {"翻译中...", "translating...", "缈昏瘧涓?.."}
-
-
-def _display_text(item: Dict[str, object]) -> str:
-    translated = str(item.get("translated", "") or "").strip()
-    if translated and not is_pending_translation(translated):
-        return translated
-    return str(item.get("source", "") or "").strip()
-
-
-def merge_short_lines(parts: List[str], merge_chars: int = 14) -> List[str]:
-    """Merge only very short fragments so normal sentences stay separate lines."""
-    merged: List[str] = []
-    sentence_end = ("。", "！", "？", "!", "?")
-    for part in parts:
-        part = part.strip()
-        if not part:
-            continue
-        if not merged:
-            merged.append(part)
-            continue
-        previous = merged[-1]
-        body = previous.rstrip("。！？!?，,、 ")
-        if not body:
-            merged[-1] = part
-        elif previous.endswith(sentence_end):
-            if len(body) >= merge_chars:
-                merged.append(part)
-            elif len(part) <= merge_chars or part[:1] in "，,、？?！!。":
-                # A short trailing fragment ("买给我？" + "吗？") belongs to the
-                # previous line; a full sentence starts a new one.
-                merged[-1] = body + "，" + part.lstrip("，,、 ")
-            else:
-                merged.append(part)
-        else:
-            merged[-1] = body + "，" + part.lstrip("，,、 ")
-    return merged
-
-
-def overlay_live_blocks(
-    history: List[Dict[str, object]],
-    active: List[Dict[str, object]],
-    max_blocks: int = 3,
-) -> Tuple[List[str], bool]:
-    """Last ``max_blocks`` sentences, finalized or still being translated.
-
-    The newest sentence is the bright current line.  Older non-final sentences
-    stay visible with their streaming translation, so a long sentence does not
-    hide behind the next sentence's source partials.
-    """
-    timeline: Dict[str, Tuple[int, str, bool]] = {}
-    for index, entry in enumerate(history[-max_blocks * 4:]):
-        chunk = str(entry.get("chunk") or f"_h{index}")
-        order = int(entry.get("order") or index)
-        timeline[chunk] = (order, _display_text(entry), True)
-    for item in active:
-        chunk = str(item.get("chunk") or "")
-        text = _display_text(item)
-        if not chunk or not text:
-            continue
-        existing = timeline.get(chunk)
-        if existing is not None and existing[2]:
-            continue
-        timeline[chunk] = (int(item.get("order") or 0), text, False)
-    ordered = sorted(timeline.values(), key=lambda value: value[0])
-    # Preserve the old display rule for consecutive finalized lines: a short
-    # finished fragment joins the previous finished line.  A sentence still
-    # being translated stays on its own line so its streaming text is visible.
-    merged: List[Tuple[int, str, bool]] = []
-    for order, text, final in ordered:
-        if (final and merged and merged[-1][2]
-                and len(merge_short_lines([merged[-1][1], text])) == 1):
-            merged[-1] = (merged[-1][0], merge_short_lines([merged[-1][1], text])[0], True)
-        else:
-            merged.append((order, text, final))
-    visible = merged[-max_blocks:]
-    blocks = [text for _order, text, _final in visible if text]
-    current_is_last = bool(visible and not visible[-1][2])
-    return blocks, current_is_last
-
-
-def overlay_history_blocks(
-    history: List[Dict[str, object]],
-    end_index: int,
-    max_blocks: int = 5,
-    merge_chars: int = 14,
-) -> List[str]:
-    """Up to ``max_blocks`` finalized lines ending before ``end_index``."""
-    end_index = max(0, min(int(end_index), len(history)))
-    start = max(0, end_index - (max_blocks + 20))
-    texts = [_display_text(item) for item in history[start:end_index]]
-    blocks = merge_short_lines([text for text in texts if text], merge_chars)
-    return blocks[-max_blocks:]
 
 
 def compose_live_subtitles(
@@ -1425,7 +1230,6 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
     pointer_state = {"x": 0, "y": 0, "moved": False, "controls_were_visible": False}
     last_rendered = {"text": ""}
     display_state = {"count": 0, "translated": "", "source": "", "updated_at": 0.0}
-    scroll_state = {"end": None}  # None = live; int = history end index
     now = time.monotonic()
     ui_state = {
         "show_source": bool(args.overlay_show_source),
@@ -1691,28 +1495,6 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         ui_state["toolbar_hover"] = False
         invalidate()
 
-    def on_mousewheel(event: tk.Event) -> None:
-        history, _current, _version = state.overlay_snapshot()
-        total = len(history)
-        if total == 0:
-            return
-        delta = int(getattr(event, "delta", 0) or 0)
-        if delta == 0:
-            return
-        steps = max(1, abs(delta) // 120)
-        if delta > 0:
-            if scroll_state["end"] is None:
-                scroll_state["end"] = total
-            else:
-                scroll_state["end"] = max(1, int(scroll_state["end"]) - steps)
-        else:
-            if scroll_state["end"] is None:
-                return
-            scroll_state["end"] = int(scroll_state["end"]) + steps
-            if int(scroll_state["end"]) >= total:
-                scroll_state["end"] = None
-        invalidate()
-
     def status_view(status: str) -> Tuple[str, str]:
         lowered = status.lower()
         if "error" in lowered or "failed" in lowered:
@@ -1732,8 +1514,6 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         fade_progress: float,
         control_progress: float,
         current_time: float,
-        current_is_last: bool = True,
-        scroll_label: str = "",
     ) -> None:
         canvas.delete("all")
         button_bounds.clear()
@@ -1825,10 +1605,6 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
             error_text, _ = status_view(status)
             outlined_line(content_x, content_top, error_text, toolbar_font, "#E56A6A")
             content_top += 22
-        if scroll_label:
-            canvas.create_text(panel_x2 - 20, content_top - 2, text=scroll_label,
-                               fill="#8E959E", font=toolbar_font, anchor="ne")
-            content_top += 18
 
         if not text:
             if ui_state["controls_visible"] or current_time - float(ui_state["empty_since"]) < 3.0:
@@ -1871,7 +1647,7 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
                 source_y += source_line_height
 
         for index, (_, lines) in enumerate(visible):
-            is_current = bool(current_is_last and index == len(visible) - 1)
+            is_current = index == len(visible) - 1
             fill = mix_color("#777D85", "#F7F8FA", fade_progress) if is_current else "#CDD1D7"
             for line in lines:
                 outlined_line(content_x, text_y, line, subtitle_font, fill)
@@ -1906,12 +1682,15 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         )
 
     def compose_live(events: List[Dict[str, object]], now: float) -> Tuple[str, str]:
+        # Keep the old paragraph merge / translation-only display, but retain
+        # more events so three lines stay on screen instead of being pushed
+        # out after the 8 s hold.
         return compose_live_subtitles(
             events,
             args.overlay_live_events,
-            args.overlay_live_max_events,
-            args.overlay_hold_seconds,
-            args.overlay_live_max_chars,
+            max(20, args.overlay_live_max_events),
+            max(60.0, args.overlay_hold_seconds),
+            max(900, args.overlay_live_max_chars),
             now=now,
         )
 
@@ -1928,29 +1707,10 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
             ui_state["status_changed_at"] = current_time
         events = snapshot["events"]
         if args.overlay_live_mode:
-            history, active, history_version = state.overlay_snapshot()
-            if scroll_state["end"] is not None and not history:
-                scroll_state["end"] = None
-            if scroll_state["end"] is None:
-                blocks, current_is_last = overlay_live_blocks(history, active, max_blocks=3)
-                text = "\n".join(blocks)
-                source = ""
-                if current_is_last and active:
-                    source = str(active[-1].get("source") or "").strip()
-                scroll_label = ""
-                live_view = True
-            else:
-                end_index = max(1, min(int(scroll_state["end"]), len(history)))
-                scroll_state["end"] = end_index
-                blocks = overlay_history_blocks(history, end_index, max_blocks=5)
-                text = "\n".join(blocks)
-                source = ""
-                current_is_last = False
-                scroll_label = ""
-                live_view = False
-                if blocks:
-                    first = max(0, end_index - len(blocks)) + 1
-                    scroll_label = f"历史 {first}–{end_index} / {len(history)} · 向下滚回最新"
+            text, source = compose_live(events, float(snapshot["monotonic_now"]))
+            paragraphs = [part for part in text.splitlines() if part.strip()]
+            if len(paragraphs) > 3:
+                text = "\n".join(paragraphs[-3:])
         else:
             if len(events) < int(display_state["count"]):
                 display_state["count"] = 0
@@ -1974,9 +1734,6 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
                     display_state["updated_at"] = now
             text = str(display_state["translated"])
             source = str(display_state["source"])
-            current_is_last = True
-            scroll_label = ""
-            live_view = True
         has_text = bool(text.strip())
         if has_text != bool(ui_state["had_text"]):
             ui_state["had_text"] = has_text
@@ -1995,22 +1752,18 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         ):
             hide_controls()
         sentence_count = len([part for part in text.splitlines() if part.strip()])
-        if live_view and sentence_count > int(ui_state["sentence_count"]):
+        if sentence_count > int(ui_state["sentence_count"]):
             ui_state["fade_started"] = current_time
         ui_state["sentence_count"] = sentence_count
-        fade_progress = (
-            min(1.0, (current_time - float(ui_state["fade_started"])) / 0.16)
-            if live_view and ui_state["fade_started"] else 1.0
-        )
+        fade_progress = min(1.0, (current_time - float(ui_state["fade_started"])) / 0.16) if ui_state["fade_started"] else 1.0
         control_progress = visibility_progress(
             bool(ui_state["controls_visible"]),
             float(ui_state["controls_changed_at"]),
             current_time,
         )
-        render_key = f"{current_status}\n{text}\n{source}\n{canvas.winfo_width()}x{canvas.winfo_height()}\n{ui_state['show_source']}\n{ui_state['locked']}\n{ui_state['expanded']}\n{ui_state['hover']}\n{ui_state['controls_visible']}\n{round(fade_progress, 1)}\n{round(control_progress, 1)}\n{int(current_time - float(ui_state['empty_since']))}\n{int(current_time - float(ui_state['status_changed_at']))}\n{current_is_last}\n{scroll_label}\n{live_view}"
+        render_key = f"{current_status}\n{text}\n{source}\n{canvas.winfo_width()}x{canvas.winfo_height()}\n{ui_state['show_source']}\n{ui_state['locked']}\n{ui_state['expanded']}\n{ui_state['hover']}\n{ui_state['controls_visible']}\n{round(fade_progress, 1)}\n{round(control_progress, 1)}\n{int(current_time - float(ui_state['empty_since']))}\n{int(current_time - float(ui_state['status_changed_at']))}"
         if render_key != last_rendered["text"]:
-            draw_text(text, source, current_status, fade_progress, control_progress,
-                      current_time, current_is_last, scroll_label)
+            draw_text(text, source, current_status, fade_progress, control_progress, current_time)
             last_rendered["text"] = render_key
         animating = fade_progress < 1.0 or 0.0 < control_progress < 1.0
         root.after(30 if animating else (100 if ui_state["controls_visible"] else 200), refresh)
@@ -2020,7 +1773,6 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
     canvas.bind("<ButtonRelease-1>", end_pointer)
     canvas.bind("<Motion>", hover_pointer)
     canvas.bind("<Leave>", leave_pointer)
-    canvas.bind("<MouseWheel>", on_mousewheel)
     root.bind("<Button-3>", close_overlay)
     root.bind("<Escape>", hide_controls)
     canvas.bind("<Button-3>", close_overlay)
