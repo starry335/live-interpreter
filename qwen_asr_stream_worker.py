@@ -185,6 +185,9 @@ class QwenASRStreamConnection(GummyConnection):
         self.draft_stop = threading.Event()
         self.draft_queue: queue.Queue = queue.Queue(maxsize=2)
         self.draft_state: Dict[str, Dict[str, object]] = {}
+        self.retry_queue: queue.Queue = queue.Queue(maxsize=8)
+        self.retry_thread: Optional[threading.Thread] = None
+        self.retry_stop = threading.Event()
         self.finalized: set = set()
         self.finalizing: set = set()
         self.final_lock = threading.Lock()
@@ -277,6 +280,8 @@ class QwenASRStreamConnection(GummyConnection):
         self.mt_thread.start()
         self.draft_thread = threading.Thread(target=self._draft_loop, daemon=True)
         self.draft_thread.start()
+        self.retry_thread = threading.Thread(target=self._retry_loop, daemon=True)
+        self.retry_thread.start()
         super().open()
         emit({
             "event": "asr_config",
@@ -746,7 +751,7 @@ class QwenASRStreamConnection(GummyConnection):
                 self.draft_queue.task_done()
 
     def _translation_failed(self, result: Dict[str, object], reason: str,
-                            partial: str = "") -> None:
+                            partial: str = "") -> bool:
         self.mt_failures += 1
         sentence_id = str(result["sentence_id"])
         draft = self.draft_cache.pop(sentence_id, "")
@@ -764,6 +769,47 @@ class QwenASRStreamConnection(GummyConnection):
         emit({"event": "result", "sentence_id": result["sentence_id"],
               "translation": translated, "translation_final": True,
               "fallback": fallback, "partial": bool(partial)})
+        runtime_safety.log_mt_timeout({
+            "model": self.args.mt_model,
+            "sentence_id": sentence_id,
+            "reason": reason,
+            "fallback": fallback,
+        })
+        return fallback
+
+    def _enqueue_retry(self, result: Dict[str, object]) -> None:
+        """One asynchronous retry after a timeout; never blocks the main queue."""
+        try:
+            self.retry_queue.put_nowait({
+                "sentence_id": result["sentence_id"],
+                "source": result["source"],
+                "history": list(result.get("_history") or []),
+            })
+        except queue.Full:
+            LOGGER.warning("MT retry queue full; skip sentence %s", result["sentence_id"])
+
+    def _retry_loop(self) -> None:
+        while not self.retry_stop.is_set() or not self.retry_queue.empty():
+            try:
+                item = self.retry_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            sentence_id = str(item["sentence_id"])
+            try:
+                translated = self.translate(
+                    str(item["source"]), sentence_id, list(item.get("history") or []))
+                if translated and translated.strip():
+                    with self.final_lock:
+                        self.finalized.add(sentence_id)
+                    emit({"event": "result", "sentence_id": sentence_id,
+                          "translation": translated, "translation_final": True,
+                          "retry": True})
+                    LOGGER.info("MT retry ok sentence=%s", sentence_id)
+            except Exception as exc:
+                LOGGER.warning("MT retry failed sentence=%s: %s", sentence_id,
+                               str(exc).replace(self.api_key, "[redacted]")[:200])
+            finally:
+                self.retry_queue.task_done()
 
     def _translate_loop(self) -> None:
         while not self.mt_stop.is_set() or not self.pending.empty():
@@ -812,7 +858,10 @@ class QwenASRStreamConnection(GummyConnection):
                             break
                         time.sleep(0.25 * attempt)
                     except TimeoutError as exc:
-                        self._translation_failed(result, f"MT timeout after {MT_TIMEOUT}s: {exc}")
+                        fallback = self._translation_failed(
+                            result, f"MT timeout after {MT_TIMEOUT}s: {exc}")
+                        if fallback:
+                            self._enqueue_retry(result)
                         break
                     except (urllib.error.URLError, ConnectionError, OSError) as exc:
                         reason = f"{type(exc).__name__}: {exc}"
@@ -830,10 +879,13 @@ class QwenASRStreamConnection(GummyConnection):
         super().close()
         self.mt_stop.set()
         self.draft_stop.set()
+        self.retry_stop.set()
         if self.mt_thread:
             self.mt_thread.join(timeout=10)
         if self.draft_thread:
             self.draft_thread.join(timeout=3)
+        if self.retry_thread:
+            self.retry_thread.join(timeout=3)
         emit({
             "event": "usage_summary", "task_id": self.task_id,
             "asr_model": self.args.model, "translation_model": self.args.mt_model,

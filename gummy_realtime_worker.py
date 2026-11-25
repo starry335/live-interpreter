@@ -11,6 +11,11 @@ import time
 import uuid
 from typing import Dict, List, Optional
 
+try:
+    import audioop  # type: ignore[import-not-found]
+except ImportError:  # Python 3.13 without audioop-lts
+    audioop = None
+
 import hotwords
 import runtime_safety
 
@@ -63,6 +68,11 @@ class GummyConnection:
         self.close_code: Optional[int] = None
         self.close_reason = ""
         self.hotword_config = getattr(args, "hotword_config", None)
+        self.last_result_monotonic = time.monotonic()
+        self.last_audio_monotonic = 0.0
+        self.last_speech_monotonic = 0.0
+        self.watchdog_thread: Optional[threading.Thread] = None
+        self.watchdog_fired = False
 
     def open(self) -> None:
         self.ws = self.websocket.create_connection(
@@ -95,10 +105,71 @@ class GummyConnection:
         emit({"event": "ready", "task_id": self.task_id})
         self.heartbeat = runtime_safety.Heartbeat(emit)
         self.heartbeat.start()
+        self.last_result_monotonic = time.monotonic()
+        self.watchdog_thread = threading.Thread(target=self._watchdog_loop, name="asr-watchdog", daemon=True)
+        self.watchdog_thread.start()
         interval = float(os.environ.get("LIVE_INTERPRETER_WS_PING", "20") or 0)
         if interval > 0:
             self.pinger = threading.Thread(target=self._ping_loop, args=(interval,), daemon=True)
             self.pinger.start()
+
+    @staticmethod
+    def _pcm_rms(data: bytes) -> int:
+        if len(data) < 2:
+            return 0
+        if audioop is not None:
+            try:
+                return int(audioop.rms(data, 2))
+            except Exception:
+                return 0
+        total = 0
+        count = len(data) // 2
+        for i in range(0, count * 2, 2):
+            sample = int.from_bytes(data[i:i + 2], "little", signed=True)
+            total += sample * sample
+        return int((total / count) ** 0.5) if count else 0
+
+    def _watchdog_loop(self) -> None:
+        """Reconnect a half-open ASR socket instead of waiting minutes for text.
+
+        Only fires when audio is still arriving and recent PCM energy says
+        someone is speaking; silence/music pauses do not trigger a reconnect.
+        """
+        timeout = float(os.environ.get("LIVE_INTERPRETER_ASR_WATCHDOG", "10") or 0)
+        if timeout <= 0:
+            return
+        rms_threshold = int(os.environ.get("LIVE_INTERPRETER_ASR_WATCHDOG_RMS", "300") or 0)
+        while not self.finished.wait(1.0):
+            if self.failed.is_set() or self.watchdog_fired:
+                return
+            now = time.monotonic()
+            age = now - self.last_result_monotonic
+            audio_recent = (now - self.last_audio_monotonic) <= 2.0
+            speech_recent = (now - self.last_speech_monotonic) <= 5.0
+            if age < timeout or not audio_recent or not speech_recent:
+                continue
+            self.watchdog_fired = True
+            payload = {
+                "event": "asr_stall",
+                "engine": self.engine_name,
+                "task_id": self.task_id,
+                "age_s": round(age, 1),
+                "threshold_s": timeout,
+                "rms_threshold": rms_threshold,
+                "audio_bytes": getattr(self, "audio_bytes", 0),
+                "close_code": self.close_code,
+            }
+            emit(payload)
+            runtime_safety.log_disconnect({"kind": "asr_stall", **payload})
+            self.error = f"ASR watchdog: no result for {age:.1f}s while speech audio was arriving."
+            self.failed.set()
+            self.finished.set()
+            try:
+                if self.ws is not None:
+                    self.ws.close()
+            except Exception:
+                pass
+            return
 
     def _ping_loop(self, interval: float) -> None:
         """Send WebSocket pings so NAT/LB idle timers do not reap the socket."""
@@ -107,7 +178,14 @@ class GummyConnection:
                 return
             try:
                 self.ws.ping("live-interpreter")
-            except Exception:
+            except Exception as exc:
+                runtime_safety.log_disconnect({
+                    "kind": "ping_failed",
+                    "engine": self.engine_name,
+                    "task_id": self.task_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "close_code": self.close_code,
+                })
                 return
 
     def _close_info(self) -> tuple[Optional[int], str]:
@@ -155,6 +233,11 @@ class GummyConnection:
                     self.started.set()
                     emit({"event": "error", "code": code, "reason": reason,
                           "message": self.error})
+                    runtime_safety.log_disconnect({
+                        "kind": "ws_error", "engine": self.engine_name,
+                        "task_id": self.task_id, "code": code,
+                        "reason": reason, "error": self.error,
+                    })
                 return
             if not raw:
                 if not self.finished.is_set():
@@ -169,6 +252,11 @@ class GummyConnection:
                     self.started.set()
                     emit({"event": "error", "code": code, "reason": reason,
                           "message": self.error})
+                    runtime_safety.log_disconnect({
+                        "kind": "ws_closed", "engine": self.engine_name,
+                        "task_id": self.task_id, "code": code,
+                        "reason": reason, "error": self.error,
+                    })
                 return
             try:
                 message = json.loads(raw)
@@ -179,6 +267,7 @@ class GummyConnection:
             if event == "task-started":
                 self.started.set()
             elif event == "result-generated":
+                self.last_result_monotonic = time.monotonic()
                 self._emit_result(message)
             elif event == "task-finished":
                 self.finished.set()
@@ -238,6 +327,10 @@ class GummyConnection:
     def send_audio(self, data: bytes) -> None:
         if self.failed.is_set() or self.finished.is_set():
             raise RuntimeError(self.error or f"{self.engine_name} task failed.")
+        now = time.monotonic()
+        self.last_audio_monotonic = now
+        if self._pcm_rms(data) >= int(os.environ.get("LIVE_INTERPRETER_ASR_WATCHDOG_RMS", "300") or 0):
+            self.last_speech_monotonic = now
         self.ws.send_binary(data)
 
     def close(self) -> None:
