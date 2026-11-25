@@ -48,6 +48,9 @@ Live Interpreter 0.4.3（2026-11-25）
   时没有备份；Workspace Paraformer 主模型也会用公开 Paraformer 备份。
 - 界面新增“主 ASR 掉线时用公开 Paraformer 备份”，默认打开；公开 Paraformer 主模型
   时置灰且保持不勾。
+- 浮窗显示：默认 3 行，上方两条是已确定的灰色历史，最下面一行是正在识别/草稿中的
+  当前句；确定后当前句变灰上移。鼠标滚轮向上可回看历史（最多同时 5 行），继续上滚
+  可看本场全部历史；向下滚回最新。
 - 按天持久日志：`runtime\logs\YYYY-MM-DD\` 下的 events / disconnect / crash /
   mt_timeout / session，追加写不覆盖，长跑后可直接查原因。
 
