@@ -1514,6 +1514,7 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         fade_progress: float,
         control_progress: float,
         current_time: float,
+        max_visible_lines: Optional[int] = None,
     ) -> None:
         canvas.delete("all")
         button_bounds.clear()
@@ -1621,6 +1622,12 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
             source_lines = wrapped_source[-min(len(wrapped_source), max_source_lines) :] if max_source_lines else []
         source_height = len(source_lines) * source_line_height
         available_height = max(line_height, content_bottom - content_top - source_height - (source_gap if source_lines else 0))
+        if max_visible_lines:
+            available_height = min(
+                available_height,
+                max_visible_lines * line_height
+                + max(0, max_visible_lines - 1) * sentence_gap,
+            )
 
         sentences = [part.strip() for part in text.splitlines() if part.strip()]
         blocks = [(sentence, wrap_pixels(sentence, subtitle_font, content_width)) for sentence in sentences]
@@ -1763,7 +1770,8 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         )
         render_key = f"{current_status}\n{text}\n{source}\n{canvas.winfo_width()}x{canvas.winfo_height()}\n{ui_state['show_source']}\n{ui_state['locked']}\n{ui_state['expanded']}\n{ui_state['hover']}\n{ui_state['controls_visible']}\n{round(fade_progress, 1)}\n{round(control_progress, 1)}\n{int(current_time - float(ui_state['empty_since']))}\n{int(current_time - float(ui_state['status_changed_at']))}"
         if render_key != last_rendered["text"]:
-            draw_text(text, source, current_status, fade_progress, control_progress, current_time)
+            draw_text(text, source, current_status, fade_progress, control_progress,
+                      current_time, max_visible_lines=3)
             last_rendered["text"] = render_key
         animating = fade_progress < 1.0 or 0.0 < control_progress < 1.0
         root.after(30 if animating else (100 if ui_state["controls_visible"] else 200), refresh)
