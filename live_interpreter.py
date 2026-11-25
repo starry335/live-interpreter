@@ -2300,6 +2300,8 @@ def handle_cloud_output(
                 final=final,
             )
             label = "final" if final else "partial"
+            if message.get("fallback"):
+                label = f"fallback {label}"
             text = translated if translated is not None else source
             if text:
                 state.set_status(f"listening ({engine_name})")
@@ -2312,6 +2314,13 @@ def handle_cloud_output(
                 )
                 if not provisional:
                     print(f"{engine_name} {label} {sentence_id}: {text}", flush=True)
+        elif event == "asr_stall_handover":
+            state.set_status(f"listening ({engine_name}, Paraformer fallback)")
+            print(f"{engine_name} fallback: Paraformer took over after "
+                  f"{message.get('age_s')}s without 3.1 results", flush=True)
+        elif event == "asr_fallback_done":
+            print(f"{engine_name} fallback: recycling the worker after "
+                  f"{message.get('after_s')}s to return to 3.1", flush=True)
         elif event == "session_config":
             hints = message.get("language_hints") or []
             print(f"{engine_name} session: model={message.get('model')} "

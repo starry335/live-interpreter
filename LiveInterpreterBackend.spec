@@ -19,7 +19,7 @@ a = Analysis(
         (str(ROOT / 'hotwords' / 'yumemita_bangdream.txt'), 'hotwords'),
     ],
     hiddenimports=['certifi', 'websocket', 'tkinter', 'tkinter.font', 'hotwords',
-                   'runtime_safety', 'qwen_asr_stream_worker'],
+                   'runtime_safety', 'asr_fallback', 'qwen_asr_stream_worker'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

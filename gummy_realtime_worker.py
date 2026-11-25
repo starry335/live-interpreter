@@ -73,6 +73,9 @@ class GummyConnection:
         self.last_speech_monotonic = 0.0
         self.watchdog_thread: Optional[threading.Thread] = None
         self.watchdog_fired = False
+        # Set by a subclass that takes the stream over (fallback engine); the
+        # deliberately closed socket must not be reported as a session error.
+        self.handed_over = False
 
     def open(self) -> None:
         self.ws = self.websocket.create_connection(
@@ -232,6 +235,8 @@ class GummyConnection:
             except self.websocket.WebSocketTimeoutException:
                 continue
             except Exception as exc:
+                if self.handed_over:
+                    return
                 if not self.finished.is_set():
                     code, reason = self._close_info()
                     self.close_code, self.close_reason = code, reason
@@ -248,6 +253,8 @@ class GummyConnection:
                     })
                 return
             if not raw:
+                if self.handed_over:
+                    return
                 if not self.finished.is_set():
                     code, reason = self._close_info()
                     self.close_code, self.close_reason = code, reason

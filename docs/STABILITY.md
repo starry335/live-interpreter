@@ -30,9 +30,31 @@ Windows 进程退出码 `4294967295` 等于 `-1`。PyInstaller 打包的程序�
 继续，不会把重连那几秒的语音静默丢掉。Edge 标签页音频也不再在每次重连时
 `discard_pending()`。
 
-`tools/replay_stream.py --reconnect N` 用同样的方式回放：worker 提前退出时从当前
-采样点起新会话，后续事件的 `sentence_id` 加 `s{n}-` 前缀，`begin_time/end_time`
-加上已喂音频的偏移，评测时间轴保持连续。
+## ASR 停摆看门狗
+
+`GummyConnection` 每分钟检查一次：音频还在到达、最近 5 秒有语音能量（PCM RMS）、
+但 8–10 秒没有新的 partial/final，就判定为 `asr_stall`：
+
+- 写 `asr_stall` 到 `events_*.jsonl` 和 `disconnect_*.log`，包含 close code、
+  最近结果年龄、已发送音频字节数；
+- 3.1 worker 先尝试把流交给预热的 Paraformer 备用进程（见下节）；
+- 备用不可用时关闭 socket 让 backend 重启 worker，而不是在屏幕上空等几分钟。
+
+阈值可用环境变量调整：`LIVE_INTERPRETER_ASR_WATCHDOG`（秒，0 关闭）、
+`LIVE_INTERPRETER_ASR_WATCHDOG_RMS`（语音能量门限）。
+
+## Paraformer 热备与音频回填
+
+3.1 会话启动时，worker 会在后台拉起一个 Paraformer worker：它完成鉴权、
+注册热词、建立 WebSocket，但不发送任何 PCM，因此不产生 ASR 计费。
+
+- 本地保留最近 30 秒 PCM（`LIVE_INTERPRETER_FALLBACK_RING_SECONDS`）。
+- 看门狗触发时，把“最后一条已经上屏的字幕之后”的音频从环形缓冲回填给 Paraformer，
+  再把实时音频接上；备用进程已经连好，首条结果通常 1–2 秒内出现。
+- 备用结果带 `pf...` 前缀的 `sentence_id`，不会覆盖 3.1 已经上屏的字幕。
+- 热备连续工作 5 分钟后（`LIVE_INTERPRETER_FALLBACK_RECYCLE`），worker 正常退出，
+  backend 重新拉起 3.1 会话，自动回到质量更高的引擎；热备进程退出时也会触发同样的回收。
+- 热备进程的日志在 `runtime/fallback/` 下，不会和主进程的按天日志混写。
 
 ## 3.1 掉线到底是什么
 
@@ -76,5 +98,11 @@ launcher 和 backend 共用一套云端引擎集合；`qwen3.1-audio` 在 Edge �
 
 - `%WORK%\crash.log`：未捕获异常/原生崩溃栈。
 - `%WORK%\cloud_recovery.log`：重连原因、重试间隔、最后一条字幕。
-- `%WORK%\qwen_asr.jsonl` / `paraformer_mt.jsonl`：完整事件流（含 hotword hit、
-  translation_usage、usage_summary）。
+- `%WORK%\logs\YYYY-MM-DD\`：按天追加、不轮转的诊断日志：
+  - `events_YYYYMMDD.jsonl`：完整事件流（含 watchdog、fallback、hotword hit、usage）；
+  - `disconnect_YYYYMMDD.log`：WebSocket close code / ping 失败 / `asr_stall`；
+  - `crash_YYYYMMDD.log`：未捕获异常；
+  - `mt_timeout_YYYYMMDD.log`：8 秒超时与回退；
+  - `session_YYYYMMDD.log`：进程启动/结束。
+- `%WORK%\qwen_asr.jsonl` / `paraformer_mt.jsonl`：当前会话的滚动事件流。
+- `%WORK%\fallback\logs\YYYY-MM-DD\`：Paraformer 热备进程自己的日志。
