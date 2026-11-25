@@ -282,7 +282,6 @@ class GummyConnection:
             if event == "task-started":
                 self.started.set()
             elif event == "result-generated":
-                self.last_result_monotonic = time.monotonic()
                 self._emit_result(message)
             elif event == "task-finished":
                 self.finished.set()
@@ -303,6 +302,10 @@ class GummyConnection:
                 return
 
     def _emit_result(self, message: Dict[str, object]) -> None:
+        # Only real text counts as progress: the Qwen task sends heartbeat
+        # sentences every few seconds, and treating those as results would
+        # keep the watchdog asleep during a real stall.
+        self.last_result_monotonic = time.monotonic()
         payload = message.get("payload") or {}
         output = payload.get("output") or {}
         transcription = output.get("transcription") or {}

@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 import gummy_realtime_worker as grw
+import qwen_asr_stream_worker as qwen
 
 
 class WatchdogTests(unittest.TestCase):
@@ -54,6 +55,21 @@ class WatchdogTests(unittest.TestCase):
         loud = b"\x00\x10" * 1600
         self.assertEqual(grw.GummyConnection._pcm_rms(quiet), 0)
         self.assertGreater(grw.GummyConnection._pcm_rms(loud), 500)
+
+    def test_qwen_heartbeat_does_not_count_as_a_result(self) -> None:
+        args = qwen.parse_args(["--no-paraformer-fallback"])
+        with mock.patch.object(qwen, "emit"):
+            conn = qwen.QwenASRStreamConnection(args, "test-key")
+        conn.last_result_monotonic = 100.0
+        with mock.patch.object(qwen, "emit"):
+            conn._emit_result({"payload": {"output": {"sentence": {
+                "heartbeat": True, "text": "", "sentence_end": False}}}})
+        self.assertEqual(conn.last_result_monotonic, 100.0)
+        with mock.patch.object(qwen, "emit"):
+            conn._emit_result({"payload": {"output": {"sentence": {
+                "heartbeat": False, "text": "こんにちは", "sentence_end": False,
+                "begin_time": 0, "end_time": 1000}}}})
+        self.assertGreater(conn.last_result_monotonic, 100.0)
 
 
 if __name__ == "__main__":

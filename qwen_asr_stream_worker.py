@@ -351,6 +351,7 @@ class QwenASRStreamConnection(GummyConnection):
         text = str(sentence.get("text") or "").strip()
         if not text:
             return
+        self.last_result_monotonic = time.monotonic()
         sentence_id = str(sentence.get("begin_time", len(self.seen_sentences)))
         final = bool(sentence.get("sentence_end"))
         if final and sentence_id in self.seen_sentences:
