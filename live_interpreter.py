@@ -1716,8 +1716,8 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         if args.overlay_live_mode:
             text, source = compose_live(events, float(snapshot["monotonic_now"]))
             paragraphs = [part for part in text.splitlines() if part.strip()]
-            if len(paragraphs) > 3:
-                text = "\n".join(paragraphs[-3:])
+            if len(paragraphs) > 2:
+                text = "\n".join(paragraphs[-2:])
         else:
             if len(events) < int(display_state["count"]):
                 display_state["count"] = 0
@@ -1771,7 +1771,7 @@ def run_overlay_window(args: argparse.Namespace, state: State, stop_event: threa
         render_key = f"{current_status}\n{text}\n{source}\n{canvas.winfo_width()}x{canvas.winfo_height()}\n{ui_state['show_source']}\n{ui_state['locked']}\n{ui_state['expanded']}\n{ui_state['hover']}\n{ui_state['controls_visible']}\n{round(fade_progress, 1)}\n{round(control_progress, 1)}\n{int(current_time - float(ui_state['empty_since']))}\n{int(current_time - float(ui_state['status_changed_at']))}"
         if render_key != last_rendered["text"]:
             draw_text(text, source, current_status, fade_progress, control_progress,
-                      current_time, max_visible_lines=3)
+                      current_time, max_visible_lines=2)
             last_rendered["text"] = render_key
         animating = fade_progress < 1.0 or 0.0 < control_progress < 1.0
         root.after(30 if animating else (100 if ui_state["controls_visible"] else 200), refresh)
