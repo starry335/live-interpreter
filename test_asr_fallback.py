@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import subprocess
 import sys
@@ -101,6 +102,35 @@ class ParaformerStandbyTests(unittest.TestCase):
             self.assertIs(standby.proc, proc)
         finally:
             standby.stop()
+
+    def test_standby_errors_never_reach_the_main_session(self):
+        standby, events = self.make_standby()
+        idle = b'{"event": "error", "code": "NO_INPUT_AUDIO_ERROR"}\n'
+        standby._pump_stdout(mock.Mock(stdout=io.BytesIO(idle)))
+        self.assertEqual(events, [])
+        self.assertIn("NO_INPUT_AUDIO_ERROR", standby.last_idle_error)
+        standby.active = True
+        standby._pump_stdout(mock.Mock(stdout=io.BytesIO(idle)))
+        self.assertEqual(events, [])
+        self.assertIn("NO_INPUT_AUDIO_ERROR", standby.last_idle_error)
+
+    def test_keeper_reconnects_a_dead_standby(self):
+        args = mock.Mock()
+        events = []
+        controller = asr_fallback.FallbackController(args, events.append, work_dir=Path("."))
+        controller.standby.stop()
+        stub = mock.Mock()
+        stub.alive.return_value = False
+        stub.start.return_value = True
+        controller.standby = stub
+        controller.warm_up()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not stub.start.called:
+                time.sleep(0.02)
+        finally:
+            controller.close()
+        self.assertTrue(stub.start.called)
 
 
 class QwenFallbackTests(unittest.TestCase):

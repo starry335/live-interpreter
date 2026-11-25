@@ -145,6 +145,7 @@ class ParaformerStandby:
         self.proc: Optional[subprocess.Popen] = None
         self.ready = threading.Event()
         self.active = False
+        self.last_idle_error = ""
         self._lock = threading.RLock()
         self._write_lock = threading.Lock()
         self._stdout_thread: Optional[threading.Thread] = None
@@ -165,6 +166,9 @@ class ParaformerStandby:
             fallback_dir = self.work_dir / "fallback"
             env["LIVE_INTERPRETER_WORK_DIR"] = str(fallback_dir)
             env["LIVE_INTERPRETER_CRASH_LOG"] = str(fallback_dir / "crash.log")
+            # The standby is idle until it is needed; the normal watchdog would
+            # treat that silence as a stall.  The parent recycles the worker.
+            env["LIVE_INTERPRETER_ASR_WATCHDOG"] = "0"
             env.setdefault("PYTHONIOENCODING", "utf-8")
             try:
                 self.proc = subprocess.Popen(
@@ -232,21 +236,37 @@ class ParaformerStandby:
     # -- audio ---------------------------------------------------------------
     def activate(self, ring: PcmRing, offset: int) -> bool:
         """Replay missing audio and start forwarding live frames."""
-        if not self.start() or not self.wait_ready():
-            return False
-        with self._write_lock:
-            self.active = True
-            payload = ring.read_from(offset)
+        for attempt in range(2):
+            if not self.start() or not self.wait_ready():
+                continue
+            with self._write_lock:
+                self.active = True
+                payload = ring.read_from(offset)
+                wrote = self._write(payload) if payload else True
+                if not wrote:
+                    self.active = False
+            if not wrote:
+                # The idle task expired between ready and the first frame;
+                # start a fresh standby and replay once more.
+                self.stop()
+                continue
             if payload:
-                self._write(payload)
-        if payload:
-            self.emit({
-                "event": "asr_fallback",
-                "engine": "Paraformer",
-                "replayed_ms": round(len(payload) / BYTES_PER_MS),
-                "ring_from_ms": round(offset / BYTES_PER_MS),
-            })
-        return True
+                self.emit({
+                    "event": "asr_fallback",
+                    "engine": "Paraformer",
+                    "replayed_ms": round(len(payload) / BYTES_PER_MS),
+                    "ring_from_ms": round(offset / BYTES_PER_MS),
+                })
+            return True
+        return False
+
+    def keepalive(self, data: bytes = b"\x00\x00" * 1600) -> None:
+        """Send a little silence so DashScope does not expire the idle task."""
+        if self.active:
+            return
+        with self._write_lock:
+            if not self.active:
+                self._write(data)
 
     def send(self, data: bytes) -> None:
         if not self.active:
@@ -254,19 +274,21 @@ class ParaformerStandby:
         with self._write_lock:
             self._write(data)
 
-    def _write(self, data: bytes) -> None:
+    def _write(self, data: bytes) -> bool:
         proc = self.proc
         if proc is None or proc.poll() is not None or not proc.stdin:
-            return
+            return False
         try:
             for start in range(0, len(data), FRAME_BYTES):
                 proc.stdin.write(data[start:start + FRAME_BYTES])
             proc.stdin.flush()
+            return True
         except (BrokenPipeError, OSError) as exc:
             self._error = f"{type(exc).__name__}: {exc}"
             self.active = False
             self.emit({"event": "warning", "fallback": True,
                        "message": f"Paraformer standby pipe failed: {self._error}"})
+            return False
 
     # -- stdout/stderr -------------------------------------------------------
     def _pump_stdout(self, proc: subprocess.Popen) -> None:
@@ -286,6 +308,15 @@ class ParaformerStandby:
                 continue
             if event in {"heartbeat", "finished", "session_config", "asr_config",
                          "hotword_vocabulary", "translation_queued"}:
+                continue
+            if event in {"error", "fatal_error"}:
+                # The standby is best-effort.  An idle task is closed after
+                # ~60 s without audio (NO_INPUT_AUDIO_ERROR) and a broken
+                # standby must never look like a main-session error: the
+                # controller recycles the worker only after the process dies.
+                self.last_idle_error = str(message.get("message") or message.get("code") or "")
+                continue
+            if event == "result" and not self.active:
                 continue
             if "sentence_id" in message:
                 message["sentence_id"] = f"{self.tag}-{message['sentence_id']}"
@@ -319,15 +350,35 @@ class FallbackController:
         self._closed = threading.Event()
 
     def warm_up(self) -> None:
-        """Connect the standby without blocking the ASR session."""
-        threading.Thread(target=self._warm_up, name="fallback-warmup", daemon=True).start()
+        """Keep the standby connected without blocking the ASR session."""
+        self._warned_unavailable = False
+        threading.Thread(target=self._keep_warm, name="fallback-warmup", daemon=True).start()
 
-    def _warm_up(self) -> None:
-        try:
-            self.standby.start()
-        except Exception as exc:  # standby is optional
-            self.emit({"event": "warning",
-                       "message": f"Paraformer standby unavailable: {type(exc).__name__}: {exc}"})
+    def _keep_warm(self) -> None:
+        """Keep the idle task alive and reconnect it if the server drops it."""
+        last_keepalive = 0.0
+        while not self._closed.wait(1.0):
+            if self.active:
+                last_keepalive = 0.0
+                continue
+            if not self.standby.alive():
+                try:
+                    started = self.standby.start()
+                except Exception as exc:  # standby is optional
+                    started = False
+                    if not self._warned_unavailable:
+                        self.emit({"event": "warning",
+                                   "message": f"Paraformer standby unavailable: "
+                                              f"{type(exc).__name__}: {exc}"})
+                        self._warned_unavailable = True
+                last_keepalive = 0.0
+                if not started:
+                    self._closed.wait(10.0)
+                continue
+            if self.standby.ready.is_set() and (
+                    not last_keepalive or time.monotonic() - last_keepalive >= 40.0):
+                self.standby.keepalive()
+                last_keepalive = time.monotonic()
 
     def feed(self, data: bytes) -> None:
         self.ring.append(data)

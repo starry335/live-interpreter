@@ -346,6 +346,11 @@ class GummyConnection:
         if self.failed.is_set() or self.finished.is_set():
             raise RuntimeError(self.error or f"{self.engine_name} task failed.")
         now = time.monotonic()
+        if not self.last_audio_monotonic:
+            # A standby connection can sit idle for minutes before its first
+            # frame; the watchdog must count silence from that frame, not from
+            # task-started.
+            self.last_result_monotonic = now
         self.last_audio_monotonic = now
         if self._pcm_rms(data) >= int(os.environ.get("LIVE_INTERPRETER_ASR_WATCHDOG_RMS", "300") or 0):
             self.last_speech_monotonic = now

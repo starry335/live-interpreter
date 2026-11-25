@@ -56,6 +56,15 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(grw.GummyConnection._pcm_rms(quiet), 0)
         self.assertGreater(grw.GummyConnection._pcm_rms(loud), 500)
 
+    def test_first_audio_restarts_the_silence_clock_for_a_warm_standby(self) -> None:
+        conn = self.make_conn(last_result_age=60, speech_age=0)
+        conn.last_audio_monotonic = 0.0
+        conn.ws = mock.Mock()
+        old = conn.last_result_monotonic
+        conn.send_audio(b"\x00\x10" * 1600)
+        self.assertGreater(conn.last_result_monotonic, old)
+        self.assertGreater(conn.last_audio_monotonic, 0.0)
+
     def test_qwen_heartbeat_does_not_count_as_a_result(self) -> None:
         args = qwen.parse_args(["--no-paraformer-fallback"])
         with mock.patch.object(qwen, "emit"):
