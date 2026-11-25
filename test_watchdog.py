@@ -19,6 +19,11 @@ class WatchdogTests(unittest.TestCase):
         conn.finished = threading.Event()
         conn.failed = threading.Event()
         conn.watchdog_fired = False
+        conn.fallback = None
+        conn.probation = False
+        conn.last_result_end_ms = 0.0
+        conn.handed_over = False
+        conn.handing_over = False
         conn.ws = None
         conn.audio_bytes = 32000
         conn.close_code = None
@@ -66,7 +71,7 @@ class WatchdogTests(unittest.TestCase):
         self.assertGreater(conn.last_audio_monotonic, 0.0)
 
     def test_qwen_heartbeat_does_not_count_as_a_result(self) -> None:
-        args = qwen.parse_args(["--no-paraformer-fallback"])
+        args = qwen.parse_args(["--no-asr-backup"])
         with mock.patch.object(qwen, "emit"):
             conn = qwen.QwenASRStreamConnection(args, "test-key")
         conn.last_result_monotonic = 100.0

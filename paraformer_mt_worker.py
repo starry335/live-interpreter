@@ -69,6 +69,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Optional {term: weight 1..50} JSON overriding the ASR vocabulary weights.")
     parser.add_argument("--vocabulary-weight", type=int, default=0,
                         help="Give every ASR term this weight (0 keeps the built-in default).")
+    parser.add_argument("--asr-backup", action=argparse.BooleanOptionalAction, default=True,
+                        help="Start a public Paraformer backup when this ASR stalls.")
     args = parser.parse_args(argv)
     raw_workspace = str(args.workspace_id or "").strip()
     args.workspace_id = hotwords.normalize_workspace_id(raw_workspace)
@@ -99,6 +101,7 @@ class ParaformerMTConnection(GummyConnection):
         self.mt_fatal = threading.Event()
         self.seen_sentences = set()
         self.audio_bytes = 0
+        self.fallback_bytes = 0
         self.asr_duration = 0.0
         self.mt_requests = 0
         self.mt_failures = 0
@@ -178,8 +181,16 @@ class ParaformerMTConnection(GummyConnection):
     def send_audio(self, data: bytes) -> None:
         if len(data) % 2:
             raise ValueError("PCM16 audio must contain complete 2-byte samples.")
+        route = self.audio_route()
+        if route == "backup":
+            self.fallback_bytes += len(data)
+            if self.fallback is not None:
+                self.fallback.feed(data)
+            return
         super().send_audio(data)
         self.audio_bytes += len(data)
+        if route == "both":
+            self.fallback_bytes += len(data)
 
     def _emit_result(self, message: Dict[str, object]) -> None:
         payload = message.get("payload") or {}
@@ -191,7 +202,17 @@ class ParaformerMTConnection(GummyConnection):
         if sentence.get("heartbeat") or not text:
             return
         self.last_result_monotonic = time.monotonic()
+        try:
+            end_time = float(sentence.get("end_time") or 0)
+        except (TypeError, ValueError):
+            end_time = 0.0
+        if end_time > 0:
+            self.last_result_end_ms = max(self.last_result_end_ms, end_time)
+        if self.probation:
+            return
         sentence_id = str(sentence.get("begin_time", len(self.seen_sentences)))
+        if self.stream_epoch:
+            sentence_id = f"r{self.stream_epoch}-{sentence_id}"
         if sentence_id in self.seen_sentences:
             return
         final = bool(sentence.get("sentence_end"))
@@ -375,6 +396,8 @@ class ParaformerMTConnection(GummyConnection):
             "event": "usage_summary", "task_id": self.task_id,
             "asr_model": ASR_MODEL, "translation_model": self.args.mt_model,
             "audio_sent_seconds": round(self.audio_bytes / 32000, 3),
+            "fallback_audio_seconds": round(self.fallback_bytes / 32000, 3),
+            "fallback_active": bool(self.fallback and self.fallback.active),
             "asr_billed_seconds": self.asr_duration,
             "translation_requests": self.mt_requests, "translation_failures": self.mt_failures,
             "translation_queued": self.translation_queued,
@@ -391,6 +414,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     work_dir = Path(args.log_file).expanduser().parent if args.log_file else os.environ.get(
         "LIVE_INTERPRETER_WORK_DIR", ""
     )
+    args.work_dir = Path(work_dir) if work_dir else None
     runtime_safety.install("paraformer-mt", work_dir)
     handler = None
     if args.log_file:

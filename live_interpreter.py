@@ -2481,6 +2481,13 @@ def cloud_stream_loop(
             "--mt-mode", "reference",
             "--context-turns", str(args.context_turns),
         ])
+    if is_paraformer_mt or is_qwen_asr:
+        # A public Paraformer main model has no backup: running the same
+        # endpoint twice would share the failure.  A workspace Paraformer or
+        # Qwen main model gets a public Paraformer backup.
+        backup_allowed = bool(getattr(args, "asr_backup", True)) and not (
+            is_paraformer_mt and not args.aliyun_workspace_id.strip())
+        command.append("--asr-backup" if backup_allowed else "--no-asr-backup")
     if args.hotwords:
         command.extend(["--hotwords", str(Path(args.hotwords).expanduser().resolve())])
     elif args.hotwords_file:
@@ -2832,6 +2839,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--mt-model", default="qwen3.8-max", help="Text translation model for paraformer-mt / qwen-audio-stream.")
     parser.add_argument("--mt-mode", default="reference", choices=["force", "reference", "background"],
                         help="Translation prompt mode; reference is the precision-first default.")
+    parser.add_argument("--asr-backup", action=argparse.BooleanOptionalAction, default=True,
+                        help="Start a public Paraformer backup when the main ASR stalls.")
     parser.add_argument("--context-turns", type=int, default=0,
                         help="Previous subtitles sent as context; 0 disables it (default).")
     glossary_group = parser.add_mutually_exclusive_group()

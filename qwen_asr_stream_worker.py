@@ -33,7 +33,6 @@ from urllib.parse import urlsplit
 from typing import Dict, List, Optional
 
 from gummy_realtime_worker import GummyConnection
-import asr_fallback
 import hotwords
 import runtime_safety
 
@@ -142,8 +141,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Snap near-miss kana name spellings onto known readings before MT.")
     parser.add_argument("--asr-warm", action=argparse.BooleanOptionalAction, default=True,
                         help="Send [asr-warm] terms at weight 1; --no-asr-warm keeps the hot list only.")
-    parser.add_argument("--paraformer-fallback", action=argparse.BooleanOptionalAction, default=True,
-                        help="Keep a warm Paraformer standby and hand over when the 3.1 socket stalls.")
+    parser.add_argument("--asr-backup", action=argparse.BooleanOptionalAction, default=True,
+                        help="Start a public Paraformer backup when this ASR stalls.")
     args = parser.parse_args(argv)
     raw_workspace = str(args.workspace_id or "").strip()
     args.workspace_id = hotwords.normalize_workspace_id(raw_workspace)
@@ -186,13 +185,7 @@ class QwenASRStreamConnection(GummyConnection):
         self.draft_input_tokens = 0
         self.draft_output_tokens = 0
         self.seen_sentences = set()
-        self.last_result_end_ms = 0.0
         self.fallback_bytes = 0
-        self.fallback = (
-            asr_fallback.FallbackController(
-                args, emit, work_dir=getattr(args, "work_dir", None))
-            if getattr(args, "paraformer_fallback", True) else None
-        )
         self.audio_bytes = 0
         self.asr_duration = 0.0
         self.mt_requests = 0
@@ -292,47 +285,20 @@ class QwenASRStreamConnection(GummyConnection):
             "draft_after_chars": getattr(self.args, "draft_after_chars", 0),
             "hotwords": self.hotword_config.summary() if self.hotword_config else None,
         })
-        if self.fallback is not None:
-            self.fallback.warm_up()
 
     def send_audio(self, data: bytes) -> None:
         if len(data) % 2:
             raise ValueError("PCM16 audio must contain complete 2-byte samples.")
-        if self.fallback is not None:
-            self.fallback.feed(data)
-            if self.fallback.active:
-                self.fallback_bytes += len(data)
-                return
+        route = self.audio_route()
+        if route == "backup":
+            self.fallback_bytes += len(data)
+            if self.fallback is not None:
+                self.fallback.feed(data)
+            return
         super().send_audio(data)
         self.audio_bytes += len(data)
-
-    def on_stall(self, payload: Dict[str, object]) -> bool:
-        """Hand the stalled stream to the warm Paraformer standby."""
-        if self.fallback is None:
-            return False
-        if self.fallback.active:
-            return True
-        try:
-            if not self.fallback.activate(self.last_result_end_ms):
-                return False
-        except Exception as exc:
-            emit({"event": "warning",
-                  "message": f"Paraformer handover failed: {type(exc).__name__}: {exc}"})
-            return False
-        emit({
-            "event": "asr_stall_handover",
-            "engine": "Paraformer",
-            "task_id": self.task_id,
-            "age_s": payload.get("age_s"),
-            "from_ms": round(self.last_result_end_ms),
-        })
-        self.handed_over = True
-        try:
-            if self.ws is not None:
-                self.ws.close()
-        except Exception:
-            pass
-        return True
+        if route == "both":
+            self.fallback_bytes += len(data)
 
     def _emit_result(self, message: Dict[str, object]) -> None:
         payload = message.get("payload") or {}
@@ -351,7 +317,17 @@ class QwenASRStreamConnection(GummyConnection):
         if not text:
             return
         self.last_result_monotonic = time.monotonic()
+        try:
+            end_time = float(sentence.get("end_time") or 0)
+        except (TypeError, ValueError):
+            end_time = 0.0
+        if end_time > 0:
+            self.last_result_end_ms = max(self.last_result_end_ms, end_time)
+        if self.probation:
+            return
         sentence_id = str(sentence.get("begin_time", len(self.seen_sentences)))
+        if self.stream_epoch:
+            sentence_id = f"r{self.stream_epoch}-{sentence_id}"
         final = bool(sentence.get("sentence_end"))
         if final and sentence_id in self.seen_sentences:
             return
@@ -367,14 +343,6 @@ class QwenASRStreamConnection(GummyConnection):
             "source_final": final, "begin_time": sentence.get("begin_time"),
             "end_time": sentence.get("end_time"),
         }
-        # Where the fallback replay should start: everything up to the end of
-        # the last subtitle the 3.1 engine actually produced was already shown.
-        try:
-            end_time = float(sentence.get("end_time") or 0)
-        except (TypeError, ValueError):
-            end_time = 0.0
-        if end_time > 0:
-            self.last_result_end_ms = max(self.last_result_end_ms, end_time)
         emit(result)
         if final:
             self.seen_sentences.add(sentence_id)
@@ -847,8 +815,6 @@ class QwenASRStreamConnection(GummyConnection):
             self.draft_thread.join(timeout=3)
         if self.retry_thread:
             self.retry_thread.join(timeout=3)
-        if self.fallback is not None:
-            self.fallback.close()
         emit({
             "event": "usage_summary", "task_id": self.task_id,
             "asr_model": self.args.model, "translation_model": self.args.mt_model,

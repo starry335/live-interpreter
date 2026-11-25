@@ -43,18 +43,24 @@ Windows 进程退出码 `4294967295` 等于 `-1`。PyInstaller 打包的程序�
 阈值可用环境变量调整：`LIVE_INTERPRETER_ASR_WATCHDOG`（秒，0 关闭）、
 `LIVE_INTERPRETER_ASR_WATCHDOG_RMS`（语音能量门限）。
 
-## Paraformer 热备与音频回填
+## 公开 Paraformer 备份
 
-3.1 会话启动时，worker 会在后台拉起一个 Paraformer worker：它完成鉴权、
-注册热词、建立 WebSocket，但不发送任何 PCM，因此不产生 ASR 计费。
+主 ASR 正常工作时**不启动**备份进程，因此不占连接、不产生费用。
 
-- 本地保留最近 30 秒 PCM（`LIVE_INTERPRETER_FALLBACK_RING_SECONDS`）。
-- 看门狗触发时，把“最后一条已经上屏的字幕之后”的音频从环形缓冲回填给 Paraformer，
-  再把实时音频接上；备用进程已经连好，首条结果通常 1–2 秒内出现。
-- 备用结果带 `pf...` 前缀的 `sentence_id`，不会覆盖 3.1 已经上屏的字幕。
-- 热备连续工作 5 分钟后（`LIVE_INTERPRETER_FALLBACK_RECYCLE`），worker 正常退出，
-  backend 重新拉起 3.1 会话，自动回到质量更高的引擎；热备进程退出时也会触发同样的回收。
-- 热备进程的日志在 `runtime/fallback/` 下，不会和主进程的按天日志混写。
+- 看门狗触发时才拉起一个**公开域名** Paraformer（`dashscope.aliyuncs.com`，显式清空
+  Workspace ID），避免和主模型共用同一个专属域名/会话。
+- 本地保留最近 30 秒 PCM（`LIVE_INTERPRETER_FALLBACK_RING_SECONDS`）。切换时把
+  “最后一条已经上屏的字幕之后”的音频从环形缓冲回填给备份，再把实时音频接上。
+- 主 worker 在备份工作期间每 15 秒尝试重连主 ASR（`LIVE_INTERPRETER_BACKUP_PROBE`）；
+  重连成功并连续 8 秒出字（`LIVE_INTERPRETER_BACKUP_PROBATION`）后自动停掉备份、
+  切回主 ASR。主模型一直不恢复时备份持续工作，不会定时重启。
+- 备份结果带 `pf...` 前缀的 `sentence_id` 和 `fallback: true`，不会覆盖主 ASR
+  已经上屏的字幕；试运行期间主 ASR 的结果只用于健康判断，不会重复上屏。
+- 主模型是公开 Paraformer 时没有备份（同一端点做备份没有意义）；主模型是
+  Workspace Paraformer 或 Qwen 时，备份固定走公开 Paraformer。
+- launcher 的“主 ASR 掉线时用公开 Paraformer 备份”默认打开；公开 Paraformer 主模型时
+  勾选框置灰且保持不勾。
+- 备份进程的日志在 `runtime/fallback/` 下，不会和主进程的按天日志混写。
 
 ## 3.1 掉线到底是什么
 

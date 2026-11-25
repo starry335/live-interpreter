@@ -47,7 +47,7 @@ STRING_SETTINGS = (
     "work_dir", "hotwords",
 )
 BOOL_SETTINGS = ("overlay_enabled", "overlay_show_source", "record_screen", "translate_enabled",
-                 "visual_enabled")
+                 "visual_enabled", "asr_backup")
 ENV_ROOT = Path(os.environ.get("LIVE_INTERPRETER_ENV", r"E:\ANACONDA\envs\funasr_py38"))
 ENV_PYTHON = ENV_ROOT / "python.exe"
 FFMPEG = ENV_ROOT / "Library" / "bin" / "ffmpeg.exe"
@@ -295,6 +295,9 @@ class Launcher:
         self.record_screen = BooleanVar(value=False)
         self.translate_enabled = BooleanVar(value=True)
         self.visual_enabled = BooleanVar(value=False)
+        self.asr_backup = BooleanVar(value=True)
+        self._backup_forced = False
+        self._backup_saved = True
 
         self._build_ui()
         self.restore_settings()
@@ -302,6 +305,7 @@ class Launcher:
         for name in (*STRING_SETTINGS, *BOOL_SETTINGS):
             getattr(self, name).trace_add("write", self.schedule_settings_save)
         self.aliyun_api_key.trace_add("write", self.api_key_changed)
+        self.aliyun_workspace_id.trace_add("write", lambda *unused: self.update_backup_control())
         self.root.after(200, self.drain_logs)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -521,8 +525,17 @@ class Launcher:
             self.record_screen.set(False)
             self.record_screen_button.configure(state="disabled")
 
+        backup_row = ttk.Frame(settings)
+        backup_row.grid(row=7, column=1, columnspan=2, sticky="w", pady=(0, 4))
+        self.backup_button = ttk.Checkbutton(
+            backup_row,
+            text="主 ASR 掉线时用公开 Paraformer 备份（默认开）",
+            variable=self.asr_backup,
+        )
+        self.backup_button.pack(side=LEFT)
+
         visual_check = ttk.Frame(settings)
-        visual_check.grid(row=7, column=1, columnspan=2, sticky="w", pady=(0, 7))
+        visual_check.grid(row=8, column=1, columnspan=2, sticky="w", pady=(0, 7))
         self.visual_button = ttk.Checkbutton(
             visual_check,
             text="画面辅助（每秒上传约 1 张 Edge 当前标签页截图）",
@@ -530,7 +543,7 @@ class Launcher:
         )
         self.visual_button.pack(side=LEFT)
         self.model_note = ttk.Label(settings)
-        self.model_note.grid(row=8, column=1, columnspan=2, sticky="w")
+        self.model_note.grid(row=9, column=1, columnspan=2, sticky="w")
 
         ttk.Label(settings, text="字幕模式").grid(row=5, column=0, sticky="w", padx=(0, 10), pady=5)
         output_row = ttk.Frame(settings)
@@ -798,6 +811,26 @@ class Launcher:
             if self.asr_engine.get() == "qwen3.1-audio" else
             "Qwen3.8 自动识别源语言、自动分句，仅输出文字字幕。" if is_qwen38 else ""
         ))
+        self.update_backup_control()
+
+    def update_backup_control(self) -> None:
+        """Disable the backup switch for a public Paraformer main engine."""
+        public_para = (
+            self.asr_engine.get() == "paraformer-mt"
+            and not hotwords.normalize_workspace_id(self.aliyun_workspace_id.get())
+        )
+        if public_para:
+            if not self._backup_forced:
+                self._backup_forced = True
+                self._backup_saved = bool(self.asr_backup.get())
+            if self.asr_backup.get():
+                self.asr_backup.set(False)
+            self.backup_button.configure(state="disabled")
+            return
+        if self._backup_forced:
+            self._backup_forced = False
+            self.asr_backup.set(bool(self._backup_saved))
+        self.backup_button.configure(state="normal")
 
     def show_model_pricing(self) -> Toplevel:
         previous = getattr(self, "pricing_window", None)
@@ -1019,6 +1052,7 @@ class Launcher:
             cmd.extend(["--translation-engine", "none"])
         if asr_engine in {"paraformer-mt", "qwen3.1-audio"}:
             cmd.extend(["--mt-model", self.mt_model.get() or "qwen3.8-max", "--mt-mode", "reference"])
+            cmd.append("--asr-backup" if self.asr_backup.get() else "--no-asr-backup")
         external_hotwords = self.hotwords.get().strip()
         if external_hotwords:
             resolved = Path(external_hotwords).expanduser().resolve()

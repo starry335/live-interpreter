@@ -1,27 +1,23 @@
-"""Warm Paraformer standby for the Qwen 3.1 streaming worker.
+"""On-demand public Paraformer backup for the live ASR workers.
 
-The 3.1 endpoint occasionally stops sending results while the audio socket
-stays open.  The watchdog in :mod:`gummy_realtime_worker` detects that case,
-but reconnecting still leaves a long gap in the subtitles.
-
-This module keeps a second worker process connected and idle:
+The main ASR (Qwen 3.1, or a workspace Paraformer) sometimes stops sending
+results while its socket stays open.  The watchdog detects that case; this
+module starts a **public-endpoint** Paraformer worker only at that moment and
+replays the audio that never reached the screen:
 
 * a PCM ring buffer holds the last ``LIVE_INTERPRETER_FALLBACK_RING_SECONDS``
   (30 s by default) of stream audio;
-* the Paraformer worker is started in the background at session start.  It
-  opens its WebSocket and registers the hotword vocabulary, but no audio is
-  sent, so it is not billed;
-* when the watchdog fires, the buffered audio that the 3.1 engine never
-  transcribed is replayed into the standby and live audio follows.  The
-  standby's results are merged into this worker's JSONL stream with a
-  ``pf``-prefixed sentence id so they cannot overwrite 3.1 subtitles;
-* after ``LIVE_INTERPRETER_FALLBACK_RECYCLE`` seconds (5 min by default) the
-  worker exits cleanly and the backend restarts a fresh 3.1 session, which
-  switches the user back to the better engine.
+* when the watchdog fires, the buffered audio after the last displayed
+  subtitle is written to a fresh Paraformer worker, then live audio follows;
+* backup results carry a ``pf``-prefixed sentence id and ``fallback: true`` so
+  they can never overwrite the main engine's subtitles;
+* the main worker keeps probing its own engine; when it produces results
+  again, the backup process is stopped and the main engine takes the stream
+  back (see ``GummyConnection._recovery_loop``).
 
-If the standby dies (for example an idle WebSocket timeout) it is restarted
-on the next activation; a failed activation simply leaves the normal
-watchdog exit path in place.
+The backup is never started before a failure, so it costs nothing while the
+main ASR works.  If the main engine is a public Paraformer there is no backup
+(the backend disables the flag).
 """
 from __future__ import annotations
 
@@ -101,19 +97,21 @@ class PcmRing:
             self._size = 0
 
 
-def build_paraformer_command(args, work_dir: Path) -> List[str]:
-    """Command line for the standby process, using the same settings."""
+def build_paraformer_command(args, work_dir: Optional[Path]) -> List[str]:
+    """Public-endpoint Paraformer worker with the same languages and glossary."""
     arguments = [
         "--source-language", str(getattr(args, "source_language", "ja")),
         "--target-language", str(getattr(args, "target_language", "Chinese")),
         "--mt-model", str(getattr(args, "mt_model", "qwen3.8-max")),
         "--max-end-silence", str(int(getattr(args, "max_end_silence", 500))),
         "--mt-mode", "reference",
-        "--log-file", str(work_dir / "paraformer_fallback.jsonl"),
+        # The backup must stay on the public endpoint even though the parent
+        # process inherits DASHSCOPE_WORKSPACE_ID from the launcher.
+        "--workspace-id", "",
+        "--no-asr-backup",
     ]
-    workspace = str(getattr(args, "workspace_id", "") or "").strip()
-    if workspace:
-        arguments.extend(["--workspace-id", workspace])
+    if work_dir:
+        arguments.extend(["--log-file", str(Path(work_dir) / "paraformer_fallback.jsonl")])
     hotwords = str(getattr(args, "hotwords", "") or "").strip()
     if hotwords:
         arguments.extend(["--hotwords", hotwords])
@@ -125,8 +123,8 @@ def build_paraformer_command(args, work_dir: Path) -> List[str]:
     return [sys.executable, str(script), *arguments]
 
 
-class ParaformerStandby:
-    """A connected, idle Paraformer worker that can take over on demand."""
+class ParaformerBackup:
+    """A public Paraformer worker started on demand."""
 
     def __init__(
         self,
@@ -161,13 +159,11 @@ class ParaformerStandby:
                 self.stop()
             command = self.command or build_paraformer_command(self.args, self.work_dir)
             env = os.environ.copy()
-            # Keep the standby's crash/daily logs in their own folder so two
-            # processes never append to the same JSONL file.
             fallback_dir = self.work_dir / "fallback"
             env["LIVE_INTERPRETER_WORK_DIR"] = str(fallback_dir)
             env["LIVE_INTERPRETER_CRASH_LOG"] = str(fallback_dir / "crash.log")
-            # The standby is idle until it is needed; the normal watchdog would
-            # treat that silence as a stall.  The parent recycles the worker.
+            # The backup has no independent fallback and must not exit just
+            # because a music segment produced no text.
             env["LIVE_INTERPRETER_ASR_WATCHDOG"] = "0"
             env.setdefault("PYTHONIOENCODING", "utf-8")
             try:
@@ -186,10 +182,10 @@ class ParaformerStandby:
             self.ready.clear()
             self.active = False
             self._stdout_thread = threading.Thread(
-                target=self._pump_stdout, args=(self.proc,), name="paraformer-standby", daemon=True)
+                target=self._pump_stdout, args=(self.proc,), name="paraformer-backup", daemon=True)
             self._stdout_thread.start()
             self._stderr_thread = threading.Thread(
-                target=self._pump_stderr, args=(self.proc,), name="paraformer-standby-err", daemon=True)
+                target=self._pump_stderr, args=(self.proc,), name="paraformer-backup-err", daemon=True)
             self._stderr_thread.start()
             return True
 
@@ -235,38 +231,27 @@ class ParaformerStandby:
 
     # -- audio ---------------------------------------------------------------
     def activate(self, ring: PcmRing, offset: int) -> bool:
-        """Replay missing audio and start forwarding live frames."""
-        for attempt in range(2):
-            if not self.start() or not self.wait_ready():
-                continue
-            with self._write_lock:
-                self.active = True
-                payload = ring.read_from(offset)
-                wrote = self._write(payload) if payload else True
-                if not wrote:
-                    self.active = False
-            if not wrote:
-                # The idle task expired between ready and the first frame;
-                # start a fresh standby and replay once more.
-                self.stop()
-                continue
-            if payload:
-                self.emit({
-                    "event": "asr_fallback",
-                    "engine": "Paraformer",
-                    "replayed_ms": round(len(payload) / BYTES_PER_MS),
-                    "ring_from_ms": round(offset / BYTES_PER_MS),
-                })
-            return True
-        return False
-
-    def keepalive(self, data: bytes = b"\x00\x00" * 1600) -> None:
-        """Send a little silence so DashScope does not expire the idle task."""
-        if self.active:
-            return
+        """Start the public worker, replay missing audio, forward live frames."""
+        if not self.start() or not self.wait_ready():
+            self.stop()
+            return False
         with self._write_lock:
-            if not self.active:
-                self._write(data)
+            self.active = True
+            payload = ring.read_from(offset)
+            wrote = self._write(payload) if payload else True
+            if not wrote:
+                self.active = False
+        if not wrote:
+            self.stop()
+            return False
+        emit_payload = {
+            "event": "asr_fallback",
+            "engine": "Paraformer (public)",
+            "replayed_ms": round(len(payload) / BYTES_PER_MS),
+            "ring_from_ms": round(offset / BYTES_PER_MS),
+        }
+        self.emit(emit_payload)
+        return True
 
     def send(self, data: bytes) -> None:
         if not self.active:
@@ -287,7 +272,7 @@ class ParaformerStandby:
             self._error = f"{type(exc).__name__}: {exc}"
             self.active = False
             self.emit({"event": "warning", "fallback": True,
-                       "message": f"Paraformer standby pipe failed: {self._error}"})
+                       "message": f"Paraformer backup pipe failed: {self._error}"})
             return False
 
     # -- stdout/stderr -------------------------------------------------------
@@ -310,10 +295,8 @@ class ParaformerStandby:
                          "hotword_vocabulary", "translation_queued"}:
                 continue
             if event in {"error", "fatal_error"}:
-                # The standby is best-effort.  An idle task is closed after
-                # ~60 s without audio (NO_INPUT_AUDIO_ERROR) and a broken
-                # standby must never look like a main-session error: the
-                # controller recycles the worker only after the process dies.
+                # The backup is best-effort; only the controller's process
+                # monitor decides when the main worker must be recycled.
                 self.last_idle_error = str(message.get("message") or message.get("code") or "")
                 continue
             if event == "result" and not self.active:
@@ -328,102 +311,67 @@ class ParaformerStandby:
             text = raw.decode("utf-8", errors="replace").rstrip()
             if text:
                 try:
-                    print(f"[fallback] {text}", file=sys.stderr, flush=True)
+                    print(f"[backup] {text}", file=sys.stderr, flush=True)
                 except (BrokenPipeError, OSError):
                     return
 
 
 class FallbackController:
-    """Glue between the Qwen connection, the ring and the standby process."""
+    """Start/park the public Paraformer backup and watch its process."""
 
     def __init__(self, args, emit: Callable[[Dict[str, object]], None],
                  work_dir: Optional[Path] = None,
-                 command: Optional[List[str]] = None) -> None:
+                 command: Optional[List[str]] = None,
+                 owner: object = None) -> None:
         self.args = args
         self.emit = emit
+        self.owner = owner
         self.ring = PcmRing(float(os.environ.get("LIVE_INTERPRETER_FALLBACK_RING_SECONDS",
                                                   str(RING_SECONDS)) or RING_SECONDS))
-        self.standby = ParaformerStandby(args, emit, work_dir=work_dir, command=command)
+        self.backup = ParaformerBackup(args, emit, work_dir=work_dir, command=command)
         self.active = False
         self.started_at = 0.0
         self._lock = threading.Lock()
         self._closed = threading.Event()
-
-    def warm_up(self) -> None:
-        """Keep the standby connected without blocking the ASR session."""
-        self._warned_unavailable = False
-        threading.Thread(target=self._keep_warm, name="fallback-warmup", daemon=True).start()
-
-    def _keep_warm(self) -> None:
-        """Keep the idle task alive and reconnect it if the server drops it."""
-        last_keepalive = 0.0
-        while not self._closed.wait(1.0):
-            if self.active:
-                last_keepalive = 0.0
-                continue
-            if not self.standby.alive():
-                try:
-                    started = self.standby.start()
-                except Exception as exc:  # standby is optional
-                    started = False
-                    if not self._warned_unavailable:
-                        self.emit({"event": "warning",
-                                   "message": f"Paraformer standby unavailable: "
-                                              f"{type(exc).__name__}: {exc}"})
-                        self._warned_unavailable = True
-                last_keepalive = 0.0
-                if not started:
-                    self._closed.wait(10.0)
-                continue
-            if self.standby.ready.is_set() and (
-                    not last_keepalive or time.monotonic() - last_keepalive >= 40.0):
-                self.standby.keepalive()
-                last_keepalive = time.monotonic()
+        self._monitor: Optional[threading.Thread] = None
 
     def feed(self, data: bytes) -> None:
         self.ring.append(data)
         if self.active:
-            self.standby.send(data)
+            self.backup.send(data)
 
     def activate(self, last_result_end_ms: float) -> bool:
         with self._lock:
             if self.active:
                 return True
             offset = self.ring.offset_for_ms(last_result_end_ms)
-            if not self.standby.activate(self.ring, offset):
+            if not self.backup.activate(self.ring, offset):
                 self.emit({"event": "warning",
-                           "message": "Paraformer standby did not become ready; reconnecting 3.1 only."})
+                           "message": "Paraformer backup did not start; restarting the main ASR."})
                 return False
             self.active = True
             self.started_at = time.monotonic()
-        threading.Thread(target=self._recycle_when_due, name="fallback-recycle", daemon=True).start()
+            self._monitor = threading.Thread(target=self._watch, name="backup-monitor", daemon=True)
+            self._monitor.start()
         return True
 
-    def _recycle_when_due(self) -> None:
-        limit = float(os.environ.get("LIVE_INTERPRETER_FALLBACK_RECYCLE", "300") or 0)
-        while not self._closed.wait(2.0):
-            if not self.standby.alive():
-                self.emit({"event": "warning", "fallback": True,
-                           "message": "Paraformer standby exited; recycling the 3.1 worker."})
-                self._recycle(1)
-                return
-            if limit > 0 and time.monotonic() - self.started_at >= limit:
-                self.emit({"event": "asr_fallback_done", "engine": "Paraformer",
-                           "after_s": round(time.monotonic() - self.started_at)})
-                self._recycle(0)
-                return
+    def deactivate(self) -> None:
+        with self._lock:
+            self.active = False
+        self.backup.stop()
 
-    def _recycle(self, code: int) -> None:
-        """Exit so the backend starts a fresh 3.1 session (and a new standby)."""
-        if self._closed.is_set():
-            return
-        try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception:
-            pass
-        os._exit(code)
+    def _watch(self) -> None:
+        while not self._closed.wait(2.0):
+            if not self.active:
+                return
+            if not self.backup.alive():
+                self.emit({"event": "warning", "fallback": True,
+                           "message": "Paraformer backup exited; restarting the main ASR."})
+                owner = self.owner
+                if owner is not None and hasattr(owner, "backup_lost"):
+                    owner.backup_lost()
+                return
 
     def close(self) -> None:
         self._closed.set()
-        self.standby.stop()
+        self.backup.stop()

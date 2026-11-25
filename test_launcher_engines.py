@@ -63,8 +63,28 @@ class LauncherEngineTests(unittest.TestCase):
         self.assertEqual(command[command.index("--mt-model") + 1], "qwen3.8-max")
         self.assertEqual(command[command.index("--gummy-max-end-silence") + 1], "500")
         self.assertNotIn("--hotword-cards", command)
+        self.assertIn("--no-asr-backup", command)
         hotwords_arg = command[command.index("--hotwords") + 1]
         self.assertTrue(hotwords_arg.endswith("yumemita_bangdream_strict.txt"))
+
+    def test_public_paraformer_disables_the_backup_switch(self):
+        app = self.make_app()
+        self.assertEqual(app.asr_engine.get(), "paraformer-mt")
+        app.update_model_controls()
+        self.assertFalse(app.asr_backup.get())
+        self.assertEqual(str(app.backup_button.cget("state")), "disabled")
+        self.enable_frozen(app)
+        self.assertIn("--no-asr-backup", app.command())
+
+    def test_workspace_paraformer_enables_the_backup_switch(self):
+        app = self.make_app()
+        app.aliyun_workspace_id.set("ws-test")
+        app.asr_engine.set("paraformer-mt")
+        app.update_model_controls()
+        self.assertTrue(app.asr_backup.get())
+        self.assertEqual(str(app.backup_button.cget("state")), "normal")
+        self.enable_frozen(app)
+        self.assertIn("--asr-backup", app.command())
 
     def test_switching_to_3_1_keeps_the_longer_silence_default(self):
         app = self.make_app()

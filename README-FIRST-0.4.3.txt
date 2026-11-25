@@ -43,8 +43,11 @@ Live Interpreter 0.4.3（2026-11-25）
 - WebSocket ping + TCP keepalive；断线时记录 close code。
 - ASR 看门狗：音频在到达、有语音能量、但 8–10 秒没有新结果时，记录 `asr_stall`
   并主动重启 ASR，不再出现 6–20 分钟没有字幕。
-- Paraformer 热备：3.1 会话启动时后台连好一个 Paraformer（不送音频、不计费）；
-  3.1 停摆时回填最近 30 秒里没上屏的音频并接管字幕；5 分钟后自动回到 3.1。
+- Paraformer 备份：默认只在主 ASR 失效时拉起一个**公开域名** Paraformer，回填最近
+  30 秒里没上屏的音频并接管字幕；主 ASR 恢复后自动切回。主模型是公开 Paraformer
+  时没有备份；Workspace Paraformer 主模型也会用公开 Paraformer 备份。
+- 界面新增“主 ASR 掉线时用公开 Paraformer 备份”，默认打开；公开 Paraformer 主模型
+  时置灰且保持不勾。
 - 按天持久日志：`runtime\logs\YYYY-MM-DD\` 下的 events / disconnect / crash /
   mt_timeout / session，追加写不覆盖，长跑后可直接查原因。
 
@@ -52,8 +55,8 @@ Live Interpreter 0.4.3（2026-11-25）
 --------
 - 歌声/音乐段仍会碎，ASR 会把歌词切成短句；这不是热词问题，建议音乐段降低期望。
 - 严格对 gold 的名字精确率低于基线（人工译文常省略名字），以“可懂度 + 热词召回 + 虚警/h”为准。
-- Paraformer 热备为空闲连接：按音频时长计费，不送音频不产生 ASR 费用（以账单为准）；
-  如果服务端回收空闲连接，切换时会重新建连，首条中文字幕会多 1–2 秒。
+- 公开 Paraformer 备份按需启动（约 1–3 秒建连 + 回填），切换时会有一次短暂停顿；
+  主 ASR 恢复后自动切回，不需要重启程序。
 
 安装/运行
 --------

@@ -73,12 +73,30 @@ class GummyConnection:
         self.last_speech_monotonic = 0.0
         self.watchdog_thread: Optional[threading.Thread] = None
         self.watchdog_fired = False
-        # Set by a subclass that takes the stream over (fallback engine); the
-        # deliberately closed socket must not be reported as a session error.
+        self.last_result_end_ms = 0.0
+        # Set when the stream is handed to the backup engine; a deliberately
+        # closed socket must not be reported as a session error.
         self.handed_over = False
+        self.handing_over = False
+        self.probation = False
+        self.probe_aborted = threading.Event()
+        self.stream_epoch = 0
+        self.generation = 0
+        self._reconnect_lock = threading.Lock()
+        self._connect_lock = threading.RLock()
+        self.fallback = None
+        if bool(getattr(args, "asr_backup", False)):
+            try:
+                import asr_fallback
+                self.fallback = asr_fallback.FallbackController(
+                    args, emit, work_dir=getattr(args, "work_dir", None), owner=self)
+            except Exception as exc:  # backup is optional
+                emit({"event": "warning",
+                      "message": f"ASR backup disabled: {type(exc).__name__}: {exc}"})
 
-    def open(self) -> None:
-        self.ws = self.websocket.create_connection(
+    # -- connection lifecycle -------------------------------------------------
+    def _new_socket(self):
+        ws = self.websocket.create_connection(
             self.websocket_url,
             header=[
                 f"Authorization: Bearer {self.api_key}",
@@ -92,29 +110,106 @@ class GummyConnection:
                 "cert_reqs": ssl.CERT_REQUIRED,
             },
         )
-        self.ws.settimeout(10.0)
+        ws.settimeout(10.0)
         try:
-            if os.name == "nt" and self.ws.sock is not None:
+            if os.name == "nt" and ws.sock is not None:
                 # 30 s idle / 5 s probe: catches dead NAT entries before the
                 # gateway resets a long-lived WebSocket.
-                self.ws.sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 30000, 5000))
+                ws.sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 30000, 5000))
         except (OSError, AttributeError):
             pass
-        self.receiver = threading.Thread(target=self._receive_loop, daemon=True)
-        self.receiver.start()
-        self.ws.send(json.dumps(self.task_request(), ensure_ascii=False))
-        if not self.started.wait(timeout=20) or self.failed.is_set():
-            raise RuntimeError(self.error or f"Timed out waiting for {self.engine_name} task-started.")
-        emit({"event": "ready", "task_id": self.task_id})
+        return ws
+
+    def _connect(self, first: bool) -> None:
+        with self._connect_lock:
+            self.generation += 1
+            generation = self.generation
+            old = self.ws
+            if old is not None:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+            self.started.clear()
+            self.failed.clear()
+            self.finished.clear()
+            self.error = ""
+            self.close_code = None
+            self.close_reason = ""
+            self.task_id = uuid.uuid4().hex
+            self.ws = self._new_socket()
+            ws = self.ws
+            self.receiver = threading.Thread(
+                target=self._receive_loop, args=(generation, ws), daemon=True)
+            self.receiver.start()
+            ws.send(json.dumps(self.task_request(), ensure_ascii=False))
+            if not self.started.wait(timeout=20) or self.failed.is_set():
+                raise RuntimeError(
+                    self.error or f"Timed out waiting for {self.engine_name} task-started.")
+            self.handed_over = False
+            self.handing_over = False
+            self.watchdog_fired = False
+            self.probation = False
+            self.probe_aborted.clear()
+            self.last_result_monotonic = time.monotonic()
+            self.last_audio_monotonic = 0.0
+            self.last_speech_monotonic = 0.0
+            if first:
+                emit({"event": "ready", "task_id": self.task_id})
+            else:
+                self.stream_epoch += 1
+                emit({"event": "asr_reconnected", "task_id": self.task_id,
+                      "epoch": self.stream_epoch, "engine": self.engine_name})
+                self._start_watchdog()
+                self._start_pinger()
+
+    def reconnect(self) -> bool:
+        """Re-open the main engine after a stall (used by the recovery probe)."""
+        if not self._reconnect_lock.acquire(blocking=False):
+            return False
+        try:
+            try:
+                self._connect(first=False)
+                return True
+            except Exception as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
+                try:
+                    if self.ws is not None:
+                        self.ws.close()
+                except Exception:
+                    pass
+                # A failed probe must not end the worker: the backup is still
+                # serving subtitles and the next probe will try again.
+                self.failed.clear()
+                self.finished.clear()
+                self.handed_over = True
+                return False
+        finally:
+            self._reconnect_lock.release()
+
+    def _start_watchdog(self) -> None:
+        if self.watchdog_thread is not None and self.watchdog_thread.is_alive():
+            return
+        self.watchdog_fired = False
+        self.watchdog_thread = threading.Thread(
+            target=self._watchdog_loop, name="asr-watchdog", daemon=True)
+        self.watchdog_thread.start()
+
+    def _start_pinger(self) -> None:
+        interval = float(os.environ.get("LIVE_INTERPRETER_WS_PING", "20") or 0)
+        if interval <= 0:
+            return
+        if self.pinger is not None and self.pinger.is_alive():
+            return
+        self.pinger = threading.Thread(target=self._ping_loop, args=(interval,), daemon=True)
+        self.pinger.start()
+
+    def open(self) -> None:
+        self._connect(first=True)
         self.heartbeat = runtime_safety.Heartbeat(emit)
         self.heartbeat.start()
-        self.last_result_monotonic = time.monotonic()
-        self.watchdog_thread = threading.Thread(target=self._watchdog_loop, name="asr-watchdog", daemon=True)
-        self.watchdog_thread.start()
-        interval = float(os.environ.get("LIVE_INTERPRETER_WS_PING", "20") or 0)
-        if interval > 0:
-            self.pinger = threading.Thread(target=self._ping_loop, args=(interval,), daemon=True)
-            self.pinger.start()
+        self._start_watchdog()
+        self._start_pinger()
 
     @staticmethod
     def _pcm_rms(data: bytes) -> int:
@@ -132,13 +227,12 @@ class GummyConnection:
             total += sample * sample
         return int((total / count) ** 0.5) if count else 0
 
+    # -- watchdog and failover ------------------------------------------------
     def _watchdog_loop(self) -> None:
-        """Reconnect a half-open ASR socket instead of waiting minutes for text.
+        """Start the backup engine when a half-open ASR socket stops producing text.
 
         Only fires when audio is still arriving and recent PCM energy says
-        someone is speaking; silence/music pauses do not trigger a reconnect.
-        Subclasses can handle the stall (e.g. switch to a fallback engine) by
-        overriding ``on_stall`` and returning True.
+        someone is speaking; silence/music pauses do not trigger it.
         """
         timeout = float(os.environ.get("LIVE_INTERPRETER_ASR_WATCHDOG", "10") or 0)
         if timeout <= 0:
@@ -178,9 +272,111 @@ class GummyConnection:
                 pass
             return
 
+    def _socket_errors_suppressed(self) -> bool:
+        """The main socket is down on purpose while the backup serves."""
+        return (self.handed_over or self.handing_over
+                or (self.fallback is not None and self.fallback.active))
+
+    def audio_route(self) -> str:
+        """main / both (probation) / backup (handover)."""
+        if self.handing_over:
+            return "backup"
+        if self.fallback is not None and self.fallback.active:
+            return "both" if self.probation else "backup"
+        return "main"
+
     def on_stall(self, payload: Dict[str, object]) -> bool:
-        """Hook for a fallback engine. Return True if the stall was handled."""
-        return False
+        """Start the public Paraformer backup and probe the main engine."""
+        if self.fallback is None:
+            return False
+        if self.probation:
+            self.probe_aborted.set()
+            self.probation = False
+            try:
+                if self.ws is not None:
+                    self.ws.close()
+            except Exception:
+                pass
+            return True
+        if self.fallback.active:
+            return True
+        # Buffer audio (and stop writing to the stalled socket) while the
+        # public worker is being started.
+        self.handing_over = True
+        try:
+            started = self.fallback.activate(self.last_result_end_ms)
+        except Exception as exc:
+            self.handing_over = False
+            emit({"event": "warning",
+                  "message": f"Paraformer backup failed: {type(exc).__name__}: {exc}"})
+            return False
+        if not started:
+            self.handing_over = False
+            return False
+        self.handing_over = False
+        emit({
+            "event": "asr_stall_handover",
+            "engine": "Paraformer (public)",
+            "task_id": self.task_id,
+            "age_s": payload.get("age_s"),
+            "from_ms": round(self.last_result_end_ms),
+        })
+        self.handed_over = True
+        try:
+            if self.ws is not None:
+                self.ws.close()
+        except Exception:
+            pass
+        threading.Thread(target=self._recovery_loop, name="asr-recovery", daemon=True).start()
+        return True
+
+    def _recovery_loop(self) -> None:
+        probe = float(os.environ.get("LIVE_INTERPRETER_BACKUP_PROBE", "15") or 15)
+        probation_s = float(os.environ.get("LIVE_INTERPRETER_BACKUP_PROBATION", "8") or 8)
+        while not self.finished.is_set():
+            if self.fallback is None or not self.fallback.active:
+                return
+            if self.finished.wait(probe):
+                return
+            if self.fallback is None or not self.fallback.active:
+                return
+            emit({"event": "asr_recovery_probe", "engine": self.engine_name,
+                  "after_s": round(time.monotonic() - self.fallback.started_at)})
+            if not self.reconnect():
+                continue
+            self.probation = True
+            self.probe_aborted.clear()
+            started = time.monotonic()
+            healthy = False
+            while time.monotonic() - started < probation_s:
+                if self.finished.is_set():
+                    return
+                if self.probe_aborted.is_set():
+                    break
+                if self.last_result_monotonic >= started:
+                    healthy = True
+                    break
+                time.sleep(0.2)
+            self.probation = False
+            if healthy:
+                if self.fallback is not None:
+                    self.fallback.deactivate()
+                self.handed_over = False
+                emit({"event": "asr_fallback_done", "reason": "main_recovered",
+                      "engine": self.engine_name})
+                return
+            self.handed_over = True
+            try:
+                if self.ws is not None:
+                    self.ws.close()
+            except Exception:
+                pass
+
+    def backup_lost(self) -> None:
+        """The public backup process died; restart the main worker."""
+        self.error = "Paraformer backup exited; restarting the main ASR."
+        self.failed.set()
+        self.finished.set()
 
     def _ping_loop(self, interval: float) -> None:
         """Send WebSocket pings so NAT/LB idle timers do not reap the socket."""
@@ -199,8 +395,8 @@ class GummyConnection:
                 })
                 return
 
-    def _close_info(self) -> tuple[Optional[int], str]:
-        frame = getattr(self.ws, "close_frame", None)
+    def _close_info(self, ws) -> tuple[Optional[int], str]:
+        frame = getattr(ws, "close_frame", None)
         if frame is None:
             return self.close_code, self.close_reason
         data = getattr(frame, "data", b"") or b""
@@ -228,17 +424,21 @@ class GummyConnection:
             },
         }
 
-    def _receive_loop(self) -> None:
+    def _receive_loop(self, generation: int, ws) -> None:
         while not self.finished.is_set():
+            if generation != self.generation:
+                return
             try:
-                raw = self.ws.recv()
+                raw = ws.recv()
             except self.websocket.WebSocketTimeoutException:
                 continue
             except Exception as exc:
-                if self.handed_over:
+                if generation != self.generation:
+                    return
+                if self._socket_errors_suppressed():
                     return
                 if not self.finished.is_set():
-                    code, reason = self._close_info()
+                    code, reason = self._close_info(ws)
                     self.close_code, self.close_reason = code, reason
                     self.error = f"{type(exc).__name__}: {exc}"
                     self.failed.set()
@@ -253,10 +453,12 @@ class GummyConnection:
                     })
                 return
             if not raw:
-                if self.handed_over:
+                if generation != self.generation:
+                    return
+                if self._socket_errors_suppressed():
                     return
                 if not self.finished.is_set():
-                    code, reason = self._close_info()
+                    code, reason = self._close_info(ws)
                     self.close_code, self.close_reason = code, reason
                     self.error = (
                         f"WebSocket closed by remote endpoint"
@@ -277,6 +479,8 @@ class GummyConnection:
                 message = json.loads(raw)
             except (TypeError, json.JSONDecodeError):
                 continue
+            if generation != self.generation:
+                return
             header = message.get("header") or {}
             event = header.get("event")
             if event == "task-started":
@@ -284,10 +488,14 @@ class GummyConnection:
             elif event == "result-generated":
                 self._emit_result(message)
             elif event == "task-finished":
+                if self._socket_errors_suppressed():
+                    return
                 self.finished.set()
                 emit({"event": "finished"})
                 return
             elif event == "task-failed":
+                if self._socket_errors_suppressed():
+                    return
                 self.error = str(header.get("error_message") or header.get("error_code") or "Task failed.")
                 self.failed.set()
                 self.finished.set()
@@ -310,6 +518,14 @@ class GummyConnection:
         output = payload.get("output") or {}
         transcription = output.get("transcription") or {}
         translations = output.get("translations") or []
+        try:
+            end_time = float(transcription.get("end_time") or 0)
+        except (TypeError, ValueError):
+            end_time = 0.0
+        if end_time > 0:
+            self.last_result_end_ms = max(self.last_result_end_ms, end_time)
+        if self.probation:
+            return
 
         if transcription:
             emit(
@@ -343,21 +559,28 @@ class GummyConnection:
             )
 
     def send_audio(self, data: bytes) -> None:
+        route = self.audio_route()
         if self.failed.is_set() or self.finished.is_set():
             raise RuntimeError(self.error or f"{self.engine_name} task failed.")
         now = time.monotonic()
         if not self.last_audio_monotonic:
-            # A standby connection can sit idle for minutes before its first
-            # frame; the watchdog must count silence from that frame, not from
-            # task-started.
+            # A connection can sit idle before its first frame; the watchdog
+            # must count silence from that frame, not from task-started.
             self.last_result_monotonic = now
         self.last_audio_monotonic = now
         if self._pcm_rms(data) >= int(os.environ.get("LIVE_INTERPRETER_ASR_WATCHDOG_RMS", "300") or 0):
             self.last_speech_monotonic = now
+        if self.fallback is not None:
+            self.fallback.feed(data)
+        if route == "backup":
+            return
         self.ws.send_binary(data)
 
     def close(self) -> None:
+        if self.fallback is not None:
+            self.fallback.close()
         if self.ws is None:
+            self.finished.set()
             return
         if self.heartbeat:
             self.heartbeat.stop()
